@@ -21,7 +21,10 @@ def _cell_filter(cells: Sequence[int] | None) -> tuple[str, list]:
         return "", []
     if not cells:
         return " AND 0", []
-    return f" AND lid IN (SELECT lid FROM leads WHERE cell IN ({','.join('?' * len(cells))}))", list(cells)
+    # EXISTS = one primary-key probe per call row; the old ``lid IN (SELECT lid FROM leads WHERE cell IN ..)`` scanned
+    # every lead of every workflow (about 1.5 s per query at 2.3M leads) and dominated the end-of-day look
+    return (f" AND EXISTS (SELECT 1 FROM leads l WHERE l.lid=calls.lid AND l.cell IN ({','.join('?' * len(cells))}))",
+            list(cells))
 
 
 def _group(store: Store, sql: str, args: list) -> dict[str, dict[int, tuple[float, float]]]:

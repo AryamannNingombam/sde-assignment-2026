@@ -32,6 +32,37 @@ STRATA_SQL = ("SELECT l.cell, c.hour, c.attempt_no, c.day - " + _FLOOR + " AS cd
               " GROUP BY l.cell, c.hour, c.attempt_no, cd")
 
 
+def strata_rows(store, wid: str, day_lo: int, today: int) -> list[tuple]:
+    """``STRATA_SQL`` over [day_lo, today], assembled from per-day parts (completed days cached).
+
+    Equal to the single query: the group key contains no day-of-call component that spans days except ``cd``,
+    which is part of the key, so per-day groups just add up. Sorted by key like SQLite's GROUP BY output.
+    """
+    merged: dict[tuple, list] = {}
+    for d in range(day_lo, today + 1):
+        if d < today:
+            rows = _strata_cached(store, wid, d)
+        else:
+            rows = [list(r) for r in store.conn.execute(STRATA_SQL, (wid, d, d))]
+        for cell, hour, att, cd, n, c, e in rows:
+            acc = merged.setdefault((cell, hour, att, cd), [0, 0, 0])
+            acc[0] += n
+            acc[1] += c
+            acc[2] += e or 0
+    return [(*k, *v) for k, v in sorted(merged.items())]
+
+
+def _strata_cached(store, wid: str, day: int) -> list:
+    row = store.conn.execute("SELECT payload FROM exp_day_cache WHERE workflow_id=? AND day=? AND col='strata'",
+                             (wid, day)).fetchone()
+    if row is not None:
+        return json.loads(row[0])
+    rows = [list(r) for r in store.conn.execute(STRATA_SQL, (wid, day, day))]
+    store.conn.execute("INSERT OR REPLACE INTO exp_day_cache(workflow_id, day, col, cells, payload) VALUES (?,?,?,?,?)",
+                       (wid, day, "strata", "-", json.dumps(rows)))
+    return rows
+
+
 def clock(minute: int) -> str:
     return f"Day {minute // DAY} {minute % DAY // 60:02d}:{minute % 60:02d}"
 
@@ -90,8 +121,7 @@ def _plan(ctx: PlanContext, wid: str, st: dict, cfg: tuple[int, dict]) -> None:
         return
     vocab, day = _vocab(store), ctx.now // DAY
     hours = list(range(*wf["dialling_window"]))
-    rows = [(c, h, a, cd, n, x, e or 0) for c, h, a, cd, n, x, e in store.conn.execute(
-        STRATA_SQL, (wid, day - settings.SCHEDULE_HISTORY_DAYS, day))]
+    rows = strata_rows(store, wid, day - settings.SCHEDULE_HISTORY_DAYS, day)
     cache: dict[int, str] = {}
 
     def assign(cell: int) -> str:
