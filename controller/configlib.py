@@ -46,7 +46,7 @@ def dist(cfg: Mapping, cohort: str, dim: str) -> dict:
 
 def dist_equal(a: Mapping, b: Mapping, tol: float = DIST_TOLERANCE) -> bool:
     """Same normalised distribution up to ``tol`` per option (ulp noise is not a change)."""
-    return all(abs(a.get(o, 0.0) - b.get(o, 0.0)) <= tol for o in set(a) | set(b))
+    return all(abs(a.get(o, 0.0) - b.get(o, 0.0)) <= tol for o in sorted(set(a) | set(b)))
 
 
 def changed_dims(old: Mapping, new: Mapping) -> list[str]:
@@ -71,7 +71,7 @@ def tv_by_cohort(old: Mapping, new: Mapping) -> dict[tuple[str, str], float]:
     for key in sorted(keys):
         for dim in AGENT_DIMS:
             a, b = dist(old, key, dim), dist(new, key, dim)
-            out[(key, dim)] = 0.5 * sum(abs(a.get(o, 0) - b.get(o, 0)) for o in set(a) | set(b))
+            out[(key, dim)] = 0.5 * sum(abs(a.get(o, 0) - b.get(o, 0)) for o in sorted(set(a) | set(b)))
     return out
 
 
@@ -89,7 +89,8 @@ def normalise_weights(weights: Mapping[str, float], where: str) -> dict[str, flo
     total = float(sum(weights.values()))
     if total <= 0:
         raise ProposalError([f"{where}: weights sum to 0"])
-    return {o: float(w) / total for o, w in weights.items() if w > 0}
+    # canonical key order: the sim samples options in body order, so order must not depend on set iteration (R5)
+    return {o: float(w) / total for o, w in sorted(weights.items()) if w > 0}
 
 
 def sim_normalise(wf: Mapping, cfg: Mapping) -> dict:

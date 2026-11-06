@@ -30,7 +30,7 @@ def reprobe_cap(h_bar: float) -> float:
 
 
 def tv(a: Mapping[str, float], b: Mapping[str, float]) -> float:
-    return 0.5 * sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in set(a) | set(b))
+    return 0.5 * sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in sorted(set(a) | set(b)))
 
 
 def _clean(alloc: Mapping[str, float]) -> dict[str, float]:
@@ -106,7 +106,7 @@ def plan_step(current: Mapping[str, float], target: Mapping[str, float], max_shi
     budget = max_shift * settings.DID_STEP_SAFETY
     if tv(cur, tgt) <= budget + _EPS:
         return tgt
-    keys = set(cur) | set(tgt)
+    keys = sorted(set(cur) | set(tgt))
     out = {k: cur.get(k, 0.0) for k in keys}
     sources = sorted((k for k in keys if cur.get(k, 0.0) > tgt.get(k, 0.0) + _EPS),
                      key=lambda k: (status.get(k) not in BAD, k))

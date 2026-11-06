@@ -135,3 +135,14 @@ def test_diff_nonempty_when_changed():
     d = cl.config_diff(BASE, new)
     assert d["prompt_version"] == {"old": "P1", "new": "P2"} and d["schedule"]["hour_weights_changed"] == ["hi"]
     assert cl.config_diff(BASE, BASE) == {"changed_dims": []}
+
+
+def test_allocation_key_order_is_canonical_regardless_of_input_order():
+    """The sim samples options in body order: the same weights must always serialise identically (R5)."""
+    cfg = copy.deepcopy(BASE)
+    cfg["allocations"]["default"]["caller_id"] = {"D3": 0.2, "D1": 0.5, "D2": 0.3}
+    other = copy.deepcopy(cfg)
+    other["allocations"]["default"]["caller_id"] = {"D2": 0.3, "D3": 0.2, "D1": 0.5}
+    a, b = cl.sim_normalise(WF, cfg), cl.sim_normalise(WF, other)
+    assert list(a["allocations"]["default"]["caller_id"]) == ["D1", "D2", "D3"]
+    assert list(a["allocations"]["default"]["caller_id"]) == list(b["allocations"]["default"]["caller_id"])

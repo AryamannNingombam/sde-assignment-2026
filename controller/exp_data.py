@@ -69,7 +69,7 @@ def load_arms(store: Store, wid: str, dim: str, start_minute: int, now: int,
                           [wid, recent_from // DAY, recent_from, *cargs])
     return {arm: ArmData(_flatten(eng_s.get(arm, {})), _flatten(rec_s.get(arm, {})), pick.get(arm, {}),
                          eng_s.get(arm, {}), rec_s.get(arm, {}))
-            for arm in set(eng_s) | set(pick) | set(rec_s)}
+            for arm in sorted(set(eng_s) | set(pick) | set(rec_s))}
 
 
 def first_exposure_minute(store: Store, wid: str, dim: str, options: Sequence[str], since: int = 0) -> int | None:

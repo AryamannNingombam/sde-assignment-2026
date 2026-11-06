@@ -62,7 +62,7 @@ def contrast(arm: Rows, control: Rows, scale: str = "log") -> Contrast | None:
     p_a, p_c = x_a / n_a, x_c / n_c
     leads = set(arm) | set(control)
     sq = 0.0
-    for lid in leads:
+    for lid in sorted(leads):
         na_i, xa_i = arm.get(lid, (0.0, 0.0))
         nc_i, xc_i = control.get(lid, (0.0, 0.0))
         ra, rc = xa_i - p_a * na_i, xc_i - p_c * nc_i
