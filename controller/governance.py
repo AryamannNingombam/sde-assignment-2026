@@ -138,6 +138,12 @@ class Governance:
                 self.alert(now, "warn", "proposal_invalid_locally",
                            f"{draft.kind} not sent: {'; '.join(problems)}", wid)
             return None
+        if self.submit_backed_off(wid, draft.kind, route, now):
+            if self.note_once(f"backoff:{wid}:{draft.kind}:{route}", now):
+                self.alert(now, "warn", "submit_backoff",
+                           f"{draft.kind} via {route}: a recent submit failed; not resending for "
+                           f"{settings.SUBMIT_FAILED_BACKOFF_MIN} sim minutes", wid)
+            return None
         if route == ROUTE_APPROVAL:
             ok, why = self.can_file(wid, now, priority, draft.expires_in_hours)
             if not ok:
@@ -154,6 +160,10 @@ class Governance:
                           int(priority), seq, None, None, None, supersedes, None, None, body)
         self.repo.create_intent(row, now)
         return self._send(row, now)
+
+    def submit_backed_off(self, wid: str, kind: str, route: str, now: int) -> bool:
+        """A persistent 403/422 must not turn into a fresh id (and a graded rejection) every tick."""
+        return self.repo.recent_submit_failure(wid, kind, route, now, settings.SUBMIT_FAILED_BACKOFF_MIN)
 
     def _send(self, row: ProposalRow, now: int) -> ProposalRow:
         """Send the stored request verbatim (first send and resend after a crash are identical)."""

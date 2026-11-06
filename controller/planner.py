@@ -119,6 +119,8 @@ class Planner:
             return None, False
         if self.gov.validate(draft, ROW_AUTO):
             return None, True  # the policy does not allow it as auto: use the approval path
+        if self.gov.submit_backed_off(wid, draft.kind, ROW_AUTO, now):
+            return None, True  # an auto 403/422 happened: use the approval route instead (its own backoff applies)
         in_flight = self.gov.in_flight(wid)
         evacuation = any(c.evidence.get("flag_evacuation") for c in changes)
         if in_flight and not evacuation:
