@@ -76,7 +76,7 @@ def _report_failure(ctx: PlanContext, code: str, name: str, wid: str | None, exc
 
         if note_once(ctx.store, f"{code}:{name}:{wid}", ctx.now):
             msg = f"{name} raised {type(exc).__name__}: {exc}"
-            ctx.store.add_alert(ctx.now, "error", code, msg, wid)
+            ctx.store.add_alert(ctx.now, "warn", code, msg, wid)
             ctx.store.add_decision(ctx.now, code, msg, wid, {"name": name, "error": type(exc).__name__})
     except Exception:  # noqa: BLE001 - reporting must never take the tick down
         log.exception("could not record %s", code)
