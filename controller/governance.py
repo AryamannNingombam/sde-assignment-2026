@@ -102,14 +102,20 @@ class Governance:
 
     def seed_plan_seqs(self) -> None:
         """Startup: raise each workflow's plan_seq floor above every ``{wid}:{seq}:{kind}`` id the sim
-        already holds, so a lost state dir cannot make us collide with (and adopt) old approvals."""
+        already holds (approvals and auto-applied config history), so a lost state dir cannot make us
+        collide with (and adopt) old proposals."""
         try:
-            approvals = self.client.list_approvals()
+            ids = [str(ap.get("proposal_id", "")) for ap in self.client.list_approvals()]
         except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
             log.warning("could not seed plan_seq from /approvals: %s", exc)
-            return
-        for ap in approvals:
-            wid, _, rest = str(ap.get("proposal_id", "")).partition(":")
+            ids = []
+        for wid in self.workflows:
+            try:
+                ids += [str(h.get("proposal_id") or "") for h in self.client.config_history(wid)]
+            except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
+                log.warning("could not seed plan_seq from %s config history: %s", wid, exc)
+        for pid in ids:
+            wid, _, rest = pid.partition(":")
             seq = rest.partition(":")[0]
             if wid in self.workflows and seq.isdigit():
                 self.repo.raise_plan_seq_floor(wid, int(seq))
@@ -270,22 +276,33 @@ class Governance:
             return self.repo.transition(row, STALE, now, "id collision with a foreign approval")
         return self._record_approval(row, ap, now)
 
-    def _find_version(self, wid: str, proposal_id: str) -> int | None:
+    def _find_history(self, wid: str, proposal_id: str) -> dict | None:
         try:
             for h in self.client.config_history(wid):
                 if h.get("proposal_id") == proposal_id:
-                    return h["version"]
+                    return h
         except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
             log.warning("config history for %s failed: %s", wid, exc)
         return None
 
+    def _find_version(self, wid: str, proposal_id: str) -> int | None:
+        h = self._find_history(wid, proposal_id)
+        return h["version"] if h else None
+
     def _adopt_auto(self, row: ProposalRow, now: int) -> ProposalRow:
-        version = self._find_version(row.workflow_id, row.proposal_id)
-        if version is None:
+        h = self._find_history(row.workflow_id, row.proposal_id)
+        if h is None:
             return row
+        if h["version"] != row.base_version + 1 or sorted(h.get("changed_dims") or []) != sorted(
+                row.body.get("dims") or []):
+            self.alert(now, "error", "proposal_id_collision",
+                       f"{row.proposal_id}: config history holds this id for a different change "
+                       f"(v{h['version']}, {h.get('changed_dims')}); re-planning", row.workflow_id)
+            self.repo.raise_plan_seq_floor(row.workflow_id, row.plan_seq)
+            return self.repo.transition(row, STALE, now, "id collision with a foreign auto-applied version")
         self.invalidate()
         return self.repo.transition(row, AUTO_APPLIED, now, "adopted from config history",
-                                    applied_version=version, applied_minute=now)
+                                    applied_version=h["version"], applied_minute=now)
 
     def _mark_applied(self, row: ProposalRow, now: int) -> ProposalRow:
         version = self._find_version(row.workflow_id, row.proposal_id)
