@@ -51,6 +51,16 @@ def _ceiling(wf: Mapping) -> float:
     return 1.0 - _wf_min_pass(wf)
 
 
+def _effective_ceiling(wf: Mapping, base: list | None) -> float:
+    """Absolute flag-rate ceiling: the governance bar (1 - min_pass), but never below what the last known-good
+    prompt's own measured flag rate (detector false positives included) plus its sampling margin says is healthy.
+    With no trusted baseline (cold start) it is the governance bar alone."""
+    floor = _ceiling(wf)
+    if base is None or base[0] < settings.HALLUC_BASELINE_MIN_CONNECTS:
+        return floor
+    return max(floor, wilson_upper(base[1], base[0], settings.Z_ONE_SIDED_P001))
+
+
 def segment_test(seg: list, base: list, alpha: float = settings.HALLUC_P) -> dict:
     """Is the prompt's flag rate above the baseline's? Exact Fisher for small counts, pooled z otherwise."""
     p = rate_greater_test(seg[1], seg[0], base[1], base[0])
@@ -161,9 +171,26 @@ def _spend_ok(ctx, wid: str, body: dict, cost: float) -> bool:
             and daily_cap_ok(ctx.store, wid, ctx.now, cost))
 
 
+def _borderline(run: Mapping, min_pass: float) -> bool:
+    """Stored validation below the bar by no more than ~2 standard errors of its own pass rate."""
+    if run["pass_rate"] >= min_pass:
+        return False
+    se = (max(run["pass_rate"] * (1 - run["pass_rate"]), 1e-4) / max(run["n"], 1)) ** 0.5
+    return min_pass - run["pass_rate"] <= 2 * se and run["n"] < settings.HALLUC_VALIDATION_N
+
+
 def _validated(ctx, wid: str, prompt: str, body: dict, min_pass: float) -> dict | None:
     """A passing validation of ``prompt`` (existing, or one paid run inside the incident budget)."""
     run = validation_for(ctx.store, wid, prompt)
+    if run is not None and 0.0 < min_pass and _borderline(run, min_pass) and prompt not in body.setdefault("revalidated", []):
+        body["revalidated"].append(prompt)  # once: a known-good prompt just below the bar gets a larger sample
+        n = max(settings.HALLUC_VALIDATION_N, run["n"])
+        cost = validation_cost(n)
+        if _spend_ok(ctx, wid, body, cost):
+            raw = run_validation(ctx.client, ctx.store, wid, prompt, ctx.now, n)
+            body["credits_spent"] += cost
+            if raw is not None:
+                run = {"run_id": raw["validation_run_id"], "n": raw["n"], "pass_rate": raw["pass_rate"]}
     if run is None:
         cost = validation_cost(settings.HALLUC_VALIDATION_N)
         if not _spend_ok(ctx, wid, body, cost):
@@ -278,8 +305,8 @@ def _open(ctx, wid: str, st: dict, live: str, base_prompt, test: dict, kind: str
 def _production_spike(ctx, wid: str, st: Mapping, live: str) -> tuple[dict, str | None, str] | None:
     """Spike test on the live prompt's own rolling bucket: relative to a baseline, else/also absolute."""
     win = hd.window_counts(st, live, ctx.now)
-    ceiling = _ceiling(ctx.workflows[wid])
     base, base_prompt, source = _baseline(st, live, ctx.now)
+    ceiling = _effective_ceiling(ctx.workflows[wid], base)
     test = None
     if base is not None:
         alpha = settings.HALLUC_P_DRIFT if base_prompt == live else settings.HALLUC_P
