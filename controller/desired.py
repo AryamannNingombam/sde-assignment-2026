@@ -10,6 +10,7 @@ Detectors run before the planner each tick and may persist incidents/state; they
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Callable, Iterable
@@ -23,6 +24,7 @@ class Priority(IntEnum):
     ROUTINE = 2
 
 
+log = logging.getLogger(__name__)
 ROUTE_AUTO = "auto"
 ROUTE_APPROVAL = "approval"
 
@@ -61,6 +63,29 @@ Detector = Callable[[PlanContext], None]
 Veto = Callable[[PlanContext, str, str], "str | None"]  # (ctx, workflow_id, proposal_kind) -> reason to withhold /apply
 
 
+# A veto hook that crashes fails SAFE: routine changes are withheld (retried next tick), but a change whose kind
+# marks a safety/harm-reducing action is never blocked by a broken hook.
+FAIL_OPEN_MARKERS = ("harm_stop", "rollback", "evacuation", "halluc", "incident", "revert")
+
+
+def _report_failure(ctx: PlanContext, code: str, name: str, wid: str | None, exc: Exception) -> None:
+    """Log with traceback, write one alert + decision per sim day per (name, workflow). Never raises."""
+    log.exception("%s: %s on %s", code, name, wid)
+    try:
+        from .detectors.common import note_once
+
+        if note_once(ctx.store, f"{code}:{name}:{wid}", ctx.now):
+            msg = f"{name} raised {type(exc).__name__}: {exc}"
+            ctx.store.add_alert(ctx.now, "error", code, msg, wid)
+            ctx.store.add_decision(ctx.now, code, msg, wid, {"name": name, "error": type(exc).__name__})
+    except Exception:  # noqa: BLE001 - reporting must never take the tick down
+        log.exception("could not record %s", code)
+
+
+def _name(fn: Callable) -> str:
+    return getattr(fn, "__qualname__", None) or repr(fn)
+
+
 class Registry:
     def __init__(self) -> None:
         self.producers: list[Producer] = []
@@ -82,7 +107,13 @@ class Registry:
     def veto(self, ctx: PlanContext, workflow_id: str, kind: str) -> str | None:
         """First reason any producer gives to withhold applying an approved change (the evidence went stale)."""
         for fn in self.vetoes:
-            reason = fn(ctx, workflow_id, kind)
+            try:
+                reason = fn(ctx, workflow_id, kind)
+            except Exception as exc:  # noqa: BLE001
+                _report_failure(ctx, "veto_failed", _name(fn), workflow_id, exc)
+                if any(m in kind for m in FAIL_OPEN_MARKERS):
+                    continue
+                return f"apply-time check {_name(fn)} failed ({type(exc).__name__}); routine change withheld until it recovers"
             if reason:
                 return reason
         return None
@@ -94,12 +125,18 @@ class Registry:
 
     def run_detectors(self, ctx: PlanContext) -> None:
         for detector in self.detectors:
-            detector(ctx)
+            try:
+                detector(ctx)
+            except Exception as exc:  # noqa: BLE001
+                _report_failure(ctx, "detector_failed", _name(detector), None, exc)
 
     def collect(self, ctx: PlanContext, workflow_id: str) -> list[DesiredChange]:
         out: list[DesiredChange] = []
         for producer in self.producers:
-            out.extend(c for c in producer(ctx, workflow_id) if c.workflow == workflow_id)
+            try:
+                out.extend(c for c in producer(ctx, workflow_id) if c.workflow == workflow_id)
+            except Exception as exc:  # noqa: BLE001
+                _report_failure(ctx, "producer_failed", _name(producer), workflow_id, exc)
         return sorted(out, key=lambda c: (c.priority, c.kind, c.summary))
 
 
