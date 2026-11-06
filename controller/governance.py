@@ -32,6 +32,7 @@ from .proposals import ProposalDraft, validate_approval_fields, validate_auto_ap
 from .store import Store
 
 log = logging.getLogger(__name__)
+LOOKUP_FAILED = object()
 _SEND_ERRORS = (c.Forbidden, c.Unprocessable, c.BadRequest, c.Conflict, c.NotFound, c.OutOfCredits,
                 c.Lapsed, c.NotApproved)
 
@@ -44,6 +45,7 @@ class Governance:
         self.repo = ProposalRepo(store)
         self._live_cache: dict[str, tuple[int, dict]] = {}
         self._noted: dict[str, int] = {}
+        self._skip_apply: set[str] = set()  # workflows whose /apply outcome is unknown this tick
 
     # ------------------------------------------------------------ helpers
     def live(self, wid: str) -> tuple[int, dict]:
@@ -66,7 +68,13 @@ class Governance:
         day = now // settings.MINUTES_PER_DAY
         if self._noted.get(key) == day:
             return False
+        row = self.store.conn.execute("SELECT value FROM detector_state WHERE detector='note_once'"
+                                      " AND key=?", (key,)).fetchone()  # survives a restart
         self._noted[key] = day
+        if row is not None and row[0] == str(day):
+            return False
+        self.store.conn.execute("INSERT OR REPLACE INTO detector_state(detector, key, value)"
+                                " VALUES ('note_once', ?, ?)", (key, str(day)))
         return True
 
     def in_flight(self, wid: str) -> list[ProposalRow]:
@@ -189,16 +197,24 @@ class Governance:
                 self.alert(now, "error", "approver_rejected_for_hygiene",
                            f"{row.proposal_id}: {reason}", row.workflow_id)
 
-    def _find_approval(self, row: ProposalRow) -> dict | None:
-        for ap in self.client.list_approvals(workflow_id=row.workflow_id):
-            if ap["proposal_id"] == row.proposal_id:
-                return ap
+    def _find_approval(self, row: ProposalRow) -> dict | None | object:
+        """The sim's approval for this proposal id, None if there is none, or ``LOOKUP_FAILED``
+        when the sim could not answer (the caller must not conclude anything from that)."""
+        try:
+            for ap in self.client.list_approvals(workflow_id=row.workflow_id):
+                if ap["proposal_id"] == row.proposal_id:
+                    return ap
+        except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
+            log.warning("approval lookup for %s failed: %s", row.proposal_id, exc)
+            return LOOKUP_FAILED
         return None
 
     def _adopt_remote(self, row: ProposalRow, now: int) -> ProposalRow:
         if row.route == ROUTE_AUTO:
             return self._adopt_auto(row, now)
         ap = self._find_approval(row)
+        if ap is LOOKUP_FAILED:
+            return row  # try again on the next reconcile
         if ap is None:
             self.alert(now, "error", "duplicate_without_approval",
                        f"{row.proposal_id}: sim says duplicate but no approval found", row.workflow_id)
@@ -206,9 +222,12 @@ class Governance:
         return self._record_approval(row, ap, now)
 
     def _find_version(self, wid: str, proposal_id: str) -> int | None:
-        for h in self.client.config_history(wid):
-            if h.get("proposal_id") == proposal_id:
-                return h["version"]
+        try:
+            for h in self.client.config_history(wid):
+                if h.get("proposal_id") == proposal_id:
+                    return h["version"]
+        except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
+            log.warning("config history for %s failed: %s", wid, exc)
         return None
 
     def _adopt_auto(self, row: ProposalRow, now: int) -> ProposalRow:
@@ -246,6 +265,8 @@ class Governance:
                 return
         else:
             ap = self._find_approval(row)
+            if ap is LOOKUP_FAILED:
+                return
             if ap is not None:
                 self._record_approval(row, ap, now)
                 return
@@ -274,12 +295,20 @@ class Governance:
             self.repo.transition(row, STALE, now, "base changed while pending; never applied")
 
     def _reconcile_apply_outcome(self, row: ProposalRow, now: int) -> None:
-        ap = self.client.get_approval(row.approval_id)
+        try:
+            ap = self.client.get_approval(row.approval_id)
+        except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
+            log.warning("apply outcome of %s unresolved: %s", row.proposal_id, exc)
+            return  # stays APPROVED with its apply_intent; the next reconcile asks again
         if ap["status"] == "applied":
             self._mark_applied(row, now)
         elif ap["status"] == "lapsed":
             self.alert(now, "error", "approval_lapsed", row.proposal_id, row.workflow_id)
             self.repo.transition(row, LAPSED, now, "sim reports lapsed")
+        else:  # the sim says not_approved yet the approval is neither applied nor lapsed: stop retrying
+            self.alert(now, "error", "apply_unexpected_status",
+                       f"{row.proposal_id}: sim status {ap['status']!r} after not_approved", row.workflow_id)
+            self.repo.transition(row, STALE, now, f"not applicable: sim status {ap['status']}")
 
     def _advance_monitoring(self, now: int) -> None:
         for row in self.repo.by_state(APPLIED, AUTO_APPLIED):
@@ -300,11 +329,15 @@ class Governance:
         self.invalidate()
         self.consume_decision_events(now)
         done: list[ProposalRow] = []
-        rows = sorted(self.repo.by_state(APPROVED), key=lambda r: (r.apply_by_minute or 0, r.plan_seq))
+        self._skip_apply.clear()
+        rows = sorted(self.repo.by_state(APPROVED),
+                      key=lambda r: (r.priority, r.apply_by_minute or 0, r.plan_seq))
         for stale_view in rows:
             row = self.repo.get(stale_view.proposal_id)
             if row is None or row.state != APPROVED:
                 continue  # superseded by an earlier apply in this loop
+            if row.workflow_id in self._skip_apply:
+                continue  # an earlier /apply here has an unknown outcome: do not risk a conflict
             if row.apply_by_minute is not None and now > row.apply_by_minute:
                 self.alert(now, "error", "approval_lapsed_locally",
                            f"{row.proposal_id}: apply_by passed; /apply NOT called", row.workflow_id)
@@ -324,6 +357,8 @@ class Governance:
         except (c.OutcomeUnknown, c.SimUnavailable) as exc:
             self.store.add_decision(now, "apply_outcome_unknown", str(exc), row.workflow_id,
                                     {"proposal_id": row.proposal_id})
+            self.invalidate()  # the live config may or may not have moved
+            self._skip_apply.add(row.workflow_id)
             return None
         except c.StaleBase:
             self.alert(now, "error", "apply_conflict", f"{row.proposal_id}: pre-check missed a stale base",
@@ -337,6 +372,7 @@ class Governance:
             return None
         except c.NotApproved:
             self._reconcile_apply_outcome(row, now)
+            self._skip_apply.add(row.workflow_id)
             return None
         crash_point("after-apply-before-record")
         self.invalidate()

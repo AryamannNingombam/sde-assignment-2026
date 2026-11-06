@@ -26,7 +26,7 @@ from .desired import DEFAULT_REGISTRY, ROUTE_AUTO, DesiredChange, PlanContext, P
 from .governance import Governance
 from .proposal_repo import ROUTE_APPROVAL as ROW_APPROVAL
 from .proposal_repo import ROUTE_AUTO as ROW_AUTO
-from .proposal_repo import ProposalRow
+from .proposal_repo import SUBMIT_FAILED, ProposalRow
 from .proposals import ProposalDraft, build_draft
 from .store import Store
 
@@ -79,7 +79,7 @@ class Planner:
         keep = []
         for ch in changes:
             try:
-                if changed_dims(current, apply_patch(wf, current, ch.patch)):
+                if changed_dims(current, apply_patch(wf, current, ch.patch, self._vocab())):
                     keep.append(ch)
             except ProposalError as exc:
                 if self.gov.note_once(f"bad:{ch.workflow}:{ch.kind}:{exc}", now):
@@ -155,7 +155,7 @@ class Planner:
             return None
         row = self.gov.submit(draft, now, route=ROW_APPROVAL, priority=top, supersedes=supersedes,
                               wanted=[c.summary for c in changes])
-        if routine and not in_flight:
+        if routine and not in_flight and row is not None and row.state != SUBMIT_FAILED:
             self.job_mark(settings.JOB_DAILY_BUNDLE, wid, now)  # one routine bundle per day
         return row
 

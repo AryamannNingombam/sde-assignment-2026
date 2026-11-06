@@ -22,12 +22,13 @@ import copy
 import math
 from typing import Any, Mapping
 
-from .cohorts import FEATURES
+from .cohorts import FEATURES, FeatureVocab
 
 AGENT_DIMS = ("welcome_message", "voice", "caller_id")
 CHANGE_DIMS = ("cohorts", *AGENT_DIMS, "prompt_version", "schedule")
 MAX_COHORTS = 20
 _EPS = 1e-9
+DIST_TOLERANCE = 1e-9  # allocations are compared on normalised values with this tolerance
 
 
 class ProposalError(ValueError):
@@ -43,13 +44,18 @@ def dist(cfg: Mapping, cohort: str, dim: str) -> dict:
     return (cfg["allocations"].get(cohort) or {}).get(dim) or cfg["allocations"]["default"][dim]
 
 
+def dist_equal(a: Mapping, b: Mapping, tol: float = DIST_TOLERANCE) -> bool:
+    """Same normalised distribution up to ``tol`` per option (ulp noise is not a change)."""
+    return all(abs(a.get(o, 0.0) - b.get(o, 0.0)) <= tol for o in set(a) | set(b))
+
+
 def changed_dims(old: Mapping, new: Mapping) -> list[str]:
     ch = []
     if old["cohorts"] != new["cohorts"]:
         ch.append("cohorts")
     keys = set(old["allocations"]) | set(new["allocations"])
     for dim in AGENT_DIMS:
-        if any(dist(old, k, dim) != dist(new, k, dim) for k in keys):
+        if any(not dist_equal(dist(old, k, dim), dist(new, k, dim)) for k in keys):
             ch.append(dim)
     if old["prompt_version"] != new["prompt_version"]:
         ch.append("prompt_version")
@@ -201,8 +207,30 @@ def complete_hours(table: Mapping, wf: Mapping, where: str, allow_zero: bool) ->
     return {str(h): clean.get(str(h), fill) for h in range(lo, hi)}
 
 
-def apply_patch(wf: Mapping, current: Mapping, patch: Mapping) -> dict:
-    """FULL proposed config = ``current`` (cohorts verbatim unless patched) + ``patch``."""
+def check_cohort_vocab(cohorts: list, vocab: FeatureVocab | None) -> None:
+    """Reject cohort ``where`` values never observed in lead events (the sim would accept them
+    and the cohort would silently match nobody). Features with an empty vocabulary are skipped."""
+    if vocab is None:
+        return
+    problems = []
+    for c in cohorts:
+        for feat, vals in (c.get("where") or {}).items():
+            known = set(vocab.values(feat))
+            if known and isinstance(vals, list):
+                bad = [v for v in vals if str(v) not in known]
+                if bad:
+                    problems.append(f"cohort {c.get('id')}: unknown {feat} values {bad}")
+    if problems:
+        raise ProposalError(problems)
+
+
+def apply_patch(wf: Mapping, current: Mapping, patch: Mapping,
+                vocab: FeatureVocab | None = None) -> dict:
+    """FULL proposed config = ``current`` (cohorts verbatim unless patched) + ``patch``.
+
+    Distributions the patch does not touch are copied from ``current`` bit for bit: they are
+    already the sim's normalised form and re-normalising would add ulp-sized phantom changes.
+    """
     cfg = copy.deepcopy(dict(current))
     cfg.setdefault("cohorts", [])
     cfg.setdefault("allocations", {})
@@ -210,6 +238,7 @@ def apply_patch(wf: Mapping, current: Mapping, patch: Mapping) -> dict:
     cfg["schedule"].setdefault("hour_weights", {})
     cfg["schedule"].setdefault("lead_preferred_hour", {})
     if "cohorts" in patch:
+        check_cohort_vocab(list(patch["cohorts"]), vocab)
         cfg["cohorts"] = copy.deepcopy(list(patch["cohorts"]))
         keep = {c["id"] for c in cfg["cohorts"]} | {"default"}
         cfg["allocations"] = {k: v for k, v in cfg["allocations"].items() if k in keep}
@@ -235,7 +264,18 @@ def apply_patch(wf: Mapping, current: Mapping, patch: Mapping) -> dict:
                 table, wf, f"schedule.hour_weights.{key}", allow_zero)
     if "lead_preferred_hour" in patch:
         cfg["schedule"]["lead_preferred_hour"] = dict(patch["lead_preferred_hour"] or {})
-    return sim_normalise(wf, cfg)
+    out = sim_normalise(wf, cfg)
+    return _restore_unpatched(out, current, patch)
+
+
+def _restore_unpatched(out: dict, current: Mapping, patch: Mapping) -> dict:
+    patched = {(k, d) for k, dims in (patch.get("allocations") or {}).items() for d in dims}
+    for key, dims in out["allocations"].items():
+        for dim in list(dims):
+            old = (current.get("allocations", {}).get(key) or {}).get(dim)
+            if old is not None and (key, dim) not in patched:
+                dims[dim] = dict(old)
+    return out
 
 
 def config_diff(old: Mapping, new: Mapping) -> dict:
@@ -253,7 +293,7 @@ def config_diff(old: Mapping, new: Mapping) -> dict:
     for key in sorted({"default"} | set(old_ids) | set(new_ids)):
         for dim in AGENT_DIMS:
             a, b = dist(old, key, dim), dist(new, key, dim)
-            if a != b:
+            if not dist_equal(a, b):
                 alloc.setdefault(key, {})[dim] = {"old": a, "new": b}
     if alloc:
         diff["allocations"] = alloc

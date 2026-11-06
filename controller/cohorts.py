@@ -46,6 +46,9 @@ class FeatureVocab:
             cell >>= 8
         return {f: out[f] for f in FEATURES}
 
+    def values(self, feature: str) -> list[str]:
+        return list(self._values.get(feature, []))
+
     def dump(self) -> str:
         return json.dumps(self._values)
 

@@ -124,7 +124,7 @@ def build_draft(store, vocab: FeatureVocab, wf: Mapping, version: int, current: 
     """Merge the changes (least urgent first, so the most urgent wins) into a FULL config."""
     cfg = dict(current)
     for change in sorted(changes, key=lambda c: -c.priority):
-        cfg = apply_patch(wf, cfg, change.patch)
+        cfg = apply_patch(wf, cfg, change.patch, vocab)
     dims = tuple(changed_dims(current, cfg))
     evidence: dict = {}
     for change in changes:
