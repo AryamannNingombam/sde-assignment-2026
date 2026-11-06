@@ -109,7 +109,7 @@ def _boundaries(ts: tuple[float, ...], alpha: float) -> tuple[float, ...]:
         inc = obf_spend(t, alpha) - prev_spent
         sd = math.sqrt(t - prev_t)
         if dens is None:
-            b_z = _N.inv_cdf(1.0 - inc) if inc < 1 else 0.0
+            b_z = _N.inv_cdf(1.0 - inc) if 1e-15 < inc < 1 else (12.0 if inc <= 1e-15 else 0.0)
             nxt = np.exp(-0.5 * (grid / sd) ** 2) / (sd * math.sqrt(2 * math.pi))
         else:
             def crossing(b: float) -> float:

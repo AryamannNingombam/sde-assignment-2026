@@ -100,3 +100,29 @@ one feature (or pair), so they are disjoint and first-match order cannot matter 
 | guardrail | `engagement_rate_max_drop` | The dry run re-weights recent dials (capacity per hour fixed, cohort share proportional to volume x weight) and re-composes engagement of connected leads; the change is blocked if the estimated absolute drop exceeds the workflow's guardrail (A3). | - |
 | `SCHEDULE_VERIFY_MIN_DIALS` / `_DONE_DIALS` | 1,500 / 4,000 | Post-apply dials needed to evaluate / finalise the before-after check. se of a standardised pickup difference at 1,500 dials per side is ~1.6 pp (0.28 base). | - |
 | `SCHEDULE_VERIFY_P` | 0.05 | Roll back only if the hour-mix-adjusted pickup (or engagement) fell by at least the guardrail AND one-sided p<0.05. There is no concurrent control, so the check is confounded (lead mix, DID changes) and conservative. | - |
+
+## Welcome x voice experiments (C6) and decay (C7)
+
+Every value is in `controller/settings.py` (`EXP_*`) and none is read from a scenario. The rule itself lives in
+`controller/exp_rules.py` and is applied unchanged by `scripts/mc_null.py` (results: `reports/mc_null.md`).
+
+| Name | Value | Derivation | Sensitivity |
+|---|---|---|---|
+| `EXP_ENTRY_SHARE`, `EXP_MAX_CHALLENGER_TOTAL` | 7.5%, 22.5% | CONTEXT C6. A challenger that is 10% worse costs 0.75 pp of engagement at entry; three challengers cap the worst plausible entry step near 2% of expected engagement only if all are that bad. | Higher shares learn faster but make a bad entry step approach the 1% harmful line. |
+| `EXP_RAMP_SHARE`, `EXP_MIN_CONTROL_SHARE` | 20%, 40% | CONTEXT C6. Control keeps at least 40% so the comparison and the harm-stop stay powered. | - |
+| ramp / drop | 1 day, 100 connects; drop at z <= -1 | CONTEXT C6. A drop costs only learning; the ramp needs only a non-negative point estimate. A challenger whose last-24h z <= -1 is also dropped: this is the in-experiment decay check (recent window vs cumulative). | z <= -0.5 drops noisy arms too early; z <= -1.5 reacts to decay a day later. |
+| `EXP_HARM_Z`, `EXP_HARM_MIN_CONNECTS`, 4 h | -3, 150, 240 min | CONTEXT C6. z <= -3 is one-sided p 0.0013 per look; with ~6 looks/day that is a ~1% false-stop rate per null arm per day. z <= -2.5 folds into the next daily bundle (which drops at -1 anyway). | -2.5: more false stops. |
+| `EXP_DESIGN_MDE`, power, `EXP_DESIGN_ALPHA` | 10%, 0.80, 0.05 | Information at which a 10% relative lift has 80% power at one-sided 0.05: I = (z_a + z_b)^2 / ln(1.1)^2 = 680 (information = 1/se^2 of the clustered log ratio). The information fraction t = I / 680 drives the spending function, so the boundary uses what was actually observed (not calendar days). | MDE 15% -> I = 300: looks come sooner, but a 10% lift can then spend more than its planned alpha. |
+| looks | t >= 0.25, 0.5, 0.75, 1.0 | CONTEXT C6: <= 4 planned looks. A daily look is taken only when the best arm's information has reached the next planned fraction. After the 4th, no winner can be declared; the experiment is not reverted (see below). | - |
+| boundary | Lan-DeMets OBF spending `2(1 - Phi(z_{a/2}/sqrt t))`, solved by numerical integration | Computed per arm from its own sequence of information fractions. Final boundary at t=1 is about 1.70 at alpha 0.05, 2.1 at 0.0125; the first look needs z about 3.7 (alpha 0.05). | - |
+| Holm | family = every challenger ever entered in the dim | Step-down: rank r among the arms is tested at alpha/(m - r + 1). Counting dropped arms keeps it conservative. | - |
+| alpha split | workflow 0.04 + 2 groups x 0.005 = 0.05 | The two pre-registered analysis groups (unions of the cohort partition, each >= 35% of traffic, cut near 50% of traffic by the natural order of the feature values) share the familywise level; a group deploys only if its own test passes. | A larger group share costs workflow-level power. |
+| point lift >= 3%, recent window | 3%; last 24 h, lower bound at 1 se > 0, >= 50 connects | CONTEXT C6. A promoted arm must not already be decaying; 1 se (not 1.96) because a single day is small and the cumulative test already holds the alpha. | z = 1.645 would reject most true winners on a single day. |
+| pickup guardrail | non-inferiority, z = 1.645, margin = the workflow's `pickup_rate_max_drop` | Per-lead clustered difference of pickup; the upper bound of the drop must lie under the margin. Needs about 1,500 dials per arm at pickup 0.3, so it can delay a promotion by about a day. | - |
+| `EXP_HOLDOUT` | 10% | CONTEXT C7. About 90 connects/day: enough for a direction and for a 25% decay to be significant after ~2 days. | - |
+| CUSUM | blocks of 150 connects, reference = first 3 blocks, k = 0.5, h = 4 | The winner's engagement is divided by the rate expected for its hour x cell mix (old control's pre-promotion cube history, shrunk with 20 pseudo-connects) so lead-mix swings do not alarm; each block is standardised by its binomial variance plus the reference's. ARL0 is about 170 blocks (~30 days at 800 connects/day); a 7% decay at one block per 4 h alarms within about a day. | h = 3: ARL0 about 60 blocks. |
+| rollback | CUSUM alarm AND holdout point estimate at or above the winner (last 24 h), OR winner vs holdout z <= -1.96 over >= 60 holdout connects | CONTEXT C7. | - |
+| after the last look without a winner | keep surviving challengers at their shares (drop/harm-stop rules only) | Reverting would be an unvalidated customer-facing change: on public_01 it graded harmful twice because the surviving arms were directionally positive. | - |
+
+Not corrected for: arm shares change at ramps, so a time-varying lead mix could bias a pooled contrast slightly
+(randomisation is per dial, so within a share regime the comparison is unbiased); the MC does not model time effects.
