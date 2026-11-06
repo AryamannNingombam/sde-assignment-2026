@@ -170,3 +170,25 @@ def test_evacuation_fills_tested_receivers_before_untested():
 def test_plan_step_unbounded_when_no_max_shift():
     t = {"D1": 1.0}
     assert dp.plan_step({"D1": 0.5, "D2": 0.5}, t, None, {"D1": dp.TESTED, "D2": dp.TESTED}) == {"D1": 1.0}
+
+
+# ------------------------------------------------------------------ exact tests (review fix 5)
+def test_fisher_greater_matches_known_value_and_small_counts():
+    # 3/10 vs 0/10: p = C(10,3)/C(20,3) = 120/1140
+    assert stats.fisher_greater(3, 10, 0, 10) == pytest.approx(120 / 1140, rel=1e-9)
+    assert stats.fisher_greater(0, 10, 3, 10) > 0.9
+    assert stats.fisher_greater(0, 0, 3, 10) == 1.0
+
+
+def test_rate_greater_test_uses_exact_for_small_counts_and_z_for_large():
+    small = stats.rate_greater_test(6, 250, 3, 400)
+    assert small == pytest.approx(stats.fisher_greater(6, 250, 3, 400))
+    big = stats.rate_greater_test(60, 2000, 30, 4000)
+    assert big == pytest.approx(stats.two_prop_z(60, 2000, 30, 4000, "greater")[1])
+
+
+def test_wilson_lower_and_non_inferiority():
+    assert stats.wilson_lower(30, 300) < 0.1 < stats.wilson_upper(30, 300)
+    assert stats.non_inferior(5, 1000, 5, 1000, 0.01)
+    assert not stats.non_inferior(40, 1000, 5, 1000, 0.01)
+    assert not stats.non_inferior(0, 0, 5, 1000, 0.01)

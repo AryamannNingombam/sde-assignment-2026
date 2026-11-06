@@ -81,3 +81,53 @@ def ratio_drop_test(x_w: int, n_w: int, xp_w: int, np_w: int, x_r: int, n_r: int
     se = math.sqrt(_logvar(x_w, n_w) + _logvar(xp_w, np_w) + _logvar(x_r, n_r) + _logvar(xp_r, np_r))
     z = math.log(q_adj) / se
     return RatioDrop(1.0 - q_adj, z, norm_sf(-z), q_w, q_r)
+
+
+def wilson_lower(x: int, n: int, z: float = 1.96) -> float:
+    """Lower Wilson bound of a binomial proportion."""
+    if n <= 0:
+        return 0.0
+    p = x / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    spread = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return max(0.0, (centre - spread) / denom)
+
+
+def _log_choose(n: int, k: int) -> float:
+    return math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+
+
+def fisher_greater(x1: int, n1: int, x2: int, n2: int) -> float:
+    """Exact one-sided Fisher p-value for "rate 1 > rate 2" (hypergeometric upper tail of x1)."""
+    if n1 <= 0 or n2 <= 0:
+        return 1.0
+    total_x, total_n = x1 + x2, n1 + n2
+    lo, hi = max(0, total_x - n2), min(n1, total_x)
+    log_den = _log_choose(total_n, total_x)
+    p = 0.0
+    for k in range(x1, hi + 1):
+        p += math.exp(_log_choose(n1, k) + _log_choose(n2, total_x - k) - log_den)
+    return min(1.0, p) if x1 > lo else 1.0
+
+
+EXACT_MIN_COUNT = 20  # below this many events on either side the normal approximation is unreliable
+EXACT_MIN_BASE_N = 1000  # ... and so is a pooled z-test against a small baseline
+
+
+def rate_greater_test(x1: int, n1: int, x2: int, n2: int) -> float:
+    """One-sided p for "rate 1 > rate 2": pooled z when counts are large, exact Fisher otherwise."""
+    if n1 <= 0 or n2 <= 0:
+        return 1.0
+    if min(x1, x2) < EXACT_MIN_COUNT or n2 < EXACT_MIN_BASE_N or n1 < EXACT_MIN_BASE_N // 5:
+        return fisher_greater(x1, n1, x2, n2)
+    return two_prop_z(x1, n1, x2, n2, alternative="greater")[1]
+
+
+def non_inferior(x_new: int, n_new: int, x_old: int, n_old: int, margin: float, z: float = 1.645) -> bool:
+    """Is the new proportion at most ``margin`` (absolute) above the old one? (upper CI bound of the difference)."""
+    if n_new <= 0 or n_old <= 0:
+        return False
+    p1, p2 = x_new / n_new, x_old / n_old
+    se = math.sqrt(p1 * (1 - p1) / n_new + p2 * (1 - p2) / n_old)
+    return (p1 - p2) + z * se <= margin
