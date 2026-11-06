@@ -91,7 +91,7 @@ DID_EVAC_FAST_RATIO = 0.6  # estimated ratio below this: evacuate at once despit
 DID_SHARE_WINDOW_HOURS = 12  # trailing window for OBSERVED per-DID traffic shares (config lags next_campaign_only)
 DID_SHARE_MIN_DIALS = 50  # fewer dials than this in the window: the observed share is unknown, use the config
 DID_EVAC_CLOSE_SHARE = 0.005  # an evacuation incident closes when the DID's observed share is below this
-DID_PASS_MIN_DIALS = 100  # dials a probed DID needs before it can be judged
+DID_PASS_MIN_DIALS = 150  # dials a probed DID needs before it can be judged (se_rel 12%: a 0.55-health number passes ~2% of the time, 16% at 100)
 DID_PASS_MIN_AGE_HOURS = 24  # "after >= 1 day passing"
 DID_WEAK_MIN_DIALS = 150
 # Materiality of a weak base: a DID whose pickup at comparable load is >= 15% below its peers costs, at a 3-way
