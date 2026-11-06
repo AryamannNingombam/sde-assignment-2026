@@ -78,7 +78,8 @@ def validate_approval_fields(draft: ProposalDraft, wf: Mapping,
     if isinstance(s, bool) or not isinstance(s, (int, float)) or not 0 <= s <= 1:
         problems.append("impact_score must be in [0,1]")
     if "prompt_version" in draft.dims:
-        run = lookup_validation(str((draft.evidence or {}).get("validation_run_id") or ""))
+        run_id = str((draft.evidence or {}).get("validation_run_id") or "")
+        run = lookup_validation(run_id) if run_id else None
         need = wf["governance"]["min_validation_pass_rate"]
         if (not run or run.get("workflow_id") != draft.workflow_id
                 or run.get("prompt_version") != draft.proposed_config["prompt_version"]):
