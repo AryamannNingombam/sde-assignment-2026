@@ -413,7 +413,7 @@ def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
     base_prompt = body.get("baseline_prompt")
     eng_ok, eng, p = True, {}, 0.0
     if base_prompt is None:  # absolute incident: the fix must sit under the governance ceiling
-        flags_ok = wilson_upper(new[1], new[0], 1.645) <= _ceiling(wf)
+        flags_ok = wilson_upper(new[1], new[0], 1.645) <= _effective_ceiling(wf, _baseline(st, live, ctx.now)[0])
     else:
         base_counts = st["base"] if (base_prompt == st["first_prompt"] and st["base_frozen"]) \
             else hd.total_counts(st, base_prompt)

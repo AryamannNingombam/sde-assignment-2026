@@ -79,3 +79,15 @@ def test_far_below_min_pass_is_not_revalidated(store):
     ctx = PlanContext(store, client, {"w": WF}, NOW)
     body = hl._new_body("P1", None, {"rate": 0.05, "base_rate": 0.015, "n": 300, "p": 1e-6}, {}, "prompt_flag_spike")
     assert hl._validated(ctx, "w", "P2", body, 0.99) is None and client.validations == []
+
+
+def test_verify_uses_the_same_effective_ceiling_as_detection(store):
+    """D2: a healthy replacement at the known-good baseline rate must close an absolute incident."""
+    st = hd.fresh_state()
+    st["prompts"]["K"] = {"total": [20000, 300, 18600.0, 10000], "hours": {}, "first_ts": -9000, "last_ts": 3000}
+    hd._apply_group(st, "P9", 100, [10000, 150, 9300.0, 5000], 5940, 6000)  # 1.5% live, bar 1%
+    body = hl._new_body("P2", None, {"rate": 0.05, "base_rate": 0.0, "n": 300, "p": 0.0}, {}, "prompt_flag_ceiling")
+    inc_id = incidents.open_incident(store, "w", "halluc", 4000, body)
+    ctx = PlanContext(store, None, {"w": WF}, 6000)
+    hl._verify(ctx, "w", {"id": inc_id, "opened_minute": 4000, "body": body}, st, "P9")
+    assert store.conn.execute("select state from incidents").fetchone()[0] == "closed"
