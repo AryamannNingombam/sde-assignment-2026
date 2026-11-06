@@ -108,7 +108,8 @@ def holdout_view(store, wid: str, dim: str, winner: str, holdout: str, since: in
     data = exp_data.load_arms(store, wid, dim, since, now, cells)
     w, h = data.get(winner, er.EMPTY), data.get(holdout, er.EMPTY)
     since_c, recent_c = er.pair_contrast(w, h), er.pair_contrast(w, h, recent=True)
-    out = {"holdout_connects": es.totals(h.engaged)[0], "recent_holdout_connects": es.totals(h.recent)[0]}
+    out = {"holdout_connects": es.totals(h.engaged)[0], "recent_holdout_connects": es.totals(h.recent)[0],
+           "recent_winner_connects": es.totals(w.recent)[0]}
     if recent_c is not None:
         out.update(recent_winner=recent_c.rate_a, recent_holdout=recent_c.rate_c, recent_lift=recent_c.lift)
     if since_c is not None:
@@ -173,6 +174,11 @@ def decide(cus: dict, held: dict, seq: dict | None = None) -> tuple[bool, str]:
         return True, (f"winner is significantly worse than the concurrent control (sequential test z {seq['z']:.2f} <= "
                       f"-{seq['boundary']:.2f}, information {seq['t']:.2f} of the epoch)")
     if cus["alarm"] and held.get("recent_lift") is not None and held["recent_lift"] <= 0:
+        lo = settings.EXP_ROLLBACK_HOLDOUT_MIN
+        n_h, n_w = held.get("recent_holdout_connects", 0), held.get("recent_winner_connects", 0)
+        if n_h < lo or n_w < lo:  # act on populations: a tiny holdout/winner window cannot confirm a rollback
+            return False, (f"hold: CUSUM alarmed but the confirming window is thin (holdout {n_h}, winner {n_w} connects"
+                           f" < {lo})")
         return True, (f"CUSUM on the winner's composition-adjusted engagement alarmed (S {cus['S']:.1f} >= "
                       f"{settings.EXP_CUSUM_H}; ratio {cus['ref_ratio']} -> {cus['last_ratio']}) and the holdout "
                       f"confirms (recent winner-vs-holdout lift {held['recent_lift']:+.1%})")

@@ -31,10 +31,26 @@ def test_too_few_blocks_cannot_alarm():
     assert not xd.cusum(blocks([1.0, 0.5, 0.5]))["alarm"]
 
 
+ENOUGH = {"recent_holdout_connects": 100, "recent_winner_connects": 900, "holdout_connects": 100}
+
+
+def test_cusum_rollback_holds_without_minimum_holdout_sample():  # B2
+    alarm = {"alarm": True, "S": 5.0, "ref_ratio": 1.0, "last_ratio": 0.9}
+    for held in ({"recent_lift": -0.05, "recent_holdout_connects": settings.EXP_ROLLBACK_HOLDOUT_MIN - 1,
+                  "recent_winner_connects": 900},
+                 {"recent_lift": -0.05, "recent_holdout_connects": 100,
+                  "recent_winner_connects": settings.EXP_ROLLBACK_HOLDOUT_MIN - 1}):
+        roll, why = xd.decide(alarm, held)
+        assert not roll and "hold" in why
+    held = {"recent_lift": -0.05, "recent_holdout_connects": settings.EXP_ROLLBACK_HOLDOUT_MIN,
+            "recent_winner_connects": settings.EXP_ROLLBACK_HOLDOUT_MIN}
+    assert xd.decide(alarm, held)[0]
+
+
 def test_rollback_needs_cusum_plus_holdout_direction_or_significance():
     alarm = {"alarm": True, "S": 5.0, "ref_ratio": 1.0, "last_ratio": 0.9}
     quiet = {"alarm": False, "S": 0.0, "ref_ratio": 1.0, "last_ratio": 1.0}
-    assert xd.decide(alarm, {"recent_lift": -0.05, "holdout_connects": 100})[0]
+    assert xd.decide(alarm, {"recent_lift": -0.05, **ENOUGH})[0]
     assert not xd.decide(alarm, {"recent_lift": 0.04, "holdout_connects": 100})[0]  # holdout disagrees: no rollback
     assert not xd.decide(quiet, {"recent_lift": -0.05, "holdout_connects": 100})[0]
     assert not xd.decide(quiet, {"since_z": -2.4, "since_lift": -0.1, "holdout_connects": 100})[0]  # CUSUM is only secondary

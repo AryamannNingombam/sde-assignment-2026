@@ -22,7 +22,7 @@ from . import exp_alloc, exp_data, exp_decay, exp_stats as es, exp_proposals as 
 from .cohorts import VOCAB_META_KEY, FeatureVocab
 from .desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from .detectors import did_plan
-from .detectors.common import latest_config
+from .detectors.common import latest_config, note_once
 
 log = logging.getLogger(__name__)
 DAY = settings.MINUTES_PER_DAY
@@ -318,6 +318,8 @@ def _decay_status(ctx, st, wid, dim, promo, since, stage_min, cells) -> tuple[di
     seq = exp_decay.sequential_alarm(c, seq_state["ts"])
     roll, why = exp_decay.decide(cus, held, seq)
     seq_state["ts"] = seq["ts"]
+    if why.startswith("hold") and note_once(ctx.store, f"rollback_held:{wid}:{dim}", ctx.now):
+        ctx.store.add_decision(ctx.now, "rollback_held", f"{dim} rollback held: {why}", wid, {"cusum": cus, "holdout": held})
     if seq["epoch_done"] and not roll:  # alpha for this epoch is spent: a fresh epoch starts now
         promo["seq"] = {"start": ctx.now, "ts": []}
     return {"cusum": cus, "holdout": held, "sequential": {k: v for k, v in seq.items() if k != "ts"}, "rollback": roll}, roll, why
