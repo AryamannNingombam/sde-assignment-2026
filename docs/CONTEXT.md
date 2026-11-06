@@ -412,7 +412,9 @@ Effects under 10%, and cohorts under 35% of traffic, generally won't reach a ver
   If two higher-priority needs collide on a 2-requests/day workflow, they merge into one proposal.
 - **P3.** Operational auto-applies (DID, schedule) run only when nothing is in flight on that workflow, with one exception: a flagged-DID
   evacuation whose estimated ratio is < 0.6. That evacuation acts at once and the in-flight approval is re-planned. Any other auto-apply waits until the approval resolves.
-- **P4. Budget:** a rolling ledger keyed on `created_at`. Routine requests get policy `max_requests_per_24h − 1`; the last slot is reserved.
+- **P4. Budget:** a rolling ledger keyed on `created_at`, three tiers. The LAST slot is reserved exclusively for safety incidents (hallucination fix,
+  flagged-DID evacuation on non-auto workflows); harm-stop/rollback may use the second-to-last slot (`max − 1`); routine bundles get `max(1, max − 2)`.
+  A rollback therefore can never block a safety fix, and a rollback colliding with a safety need is merged into the one superseding proposal (P2).
   ks_cancel has a soft cap of 2/day and none before 11:00.
 - **P5. Timing:** file at approver-open, or 11:00 for ks_cancel, only if the worst-case decision time `next_working(now + max_latency)` falls before
   `expires_at`. Never at night. Scheduled jobs (daily bundle, daily looks, hourly DID evaluation) are keyed by sim-time, with `last_run` persisted.
