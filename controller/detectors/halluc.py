@@ -375,6 +375,9 @@ def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
         eng_ok, eng = engagement_ok(new, base_counts, _max_engagement_drop(wf))
     info = {"prompt": live, "n": new[0], "flag_rate": round(_rate(new), 5), "p": p, "margin": round(margin, 5),
             "flags_ok": flags_ok, "engagement_ok": eng_ok, **eng}
+    significantly_worse = base_prompt is not None and p < settings.HALLUC_VERIFY_P
+    if eng_ok and not flags_ok and not significantly_worse and new[0] < settings.HALLUC_VERIFY_MAX_CONNECTS:
+        return  # inconclusive, not failed: keep collecting until non-inferiority is resolvable or clearly worse
     if flags_ok and eng_ok:
         ctx.store.add_decision(ctx.now, "incident_verified", f"{live}: flags {info['flag_rate']:.2%}, engagement ok", wid, info)
         close_incident(ctx.store, inc["id"], ctx.now,

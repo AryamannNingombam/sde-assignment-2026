@@ -311,3 +311,23 @@ def test_noisy_single_day0_run_is_inconclusive_not_an_incident(store):
                                        "n": 300, "pass_rate": 0.95}, 3, 1)
     assert hl._detect_day0(ctx_for(store, FakeClient(), now=101), "w", st, "P1") is True
     assert store.count("incidents") == 1
+
+
+def _verify_state(prompt_counts):
+    st = hd.fresh_state()
+    st["first_prompt"], st["base"], st["base_frozen"] = "P1", [17000, 226, 16000.0, 9200], True
+    hd._apply_group(st, "P1", 100, prompt_counts, 5940, 6000)
+    return st
+
+
+def test_verify_waits_when_non_inferiority_is_not_yet_resolvable(store):
+    """A good fix with a ~1.7% observed rate cannot be shown non-inferior at n=413; that is 'wait', not 'fail'."""
+    body = new_body()
+    inc_id = incidents.open_incident(store, "w", "halluc", 4000, body)
+    st = _verify_state([413, 7, 380.0, 230])
+    inc = {"id": inc_id, "opened_minute": 4000, "body": body}
+    hl._verify(ctx_for(store, FakeClient(), now=6000), "w", inc, st, "P1")
+    assert body["tried"] == [] and store.conn.execute("select state from incidents").fetchone()[0] == "open"
+    st = _verify_state([1600, 24, 1480.0, 900])  # enough data: 1.5% vs 1.3% base is non-inferior at the 1pp margin
+    hl._verify(ctx_for(store, FakeClient(), now=6000), "w", inc, st, "P1")
+    assert store.conn.execute("select state from incidents").fetchone()[0] == "closed"

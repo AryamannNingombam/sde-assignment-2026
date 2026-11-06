@@ -60,7 +60,7 @@ def status_of(ev: did_eval.Evaluation, did: str, st: Mapping) -> str:
     peer = ev.peers.get(did)
     if peer is None and reprobing:
         return REPROBE  # a re-probed number must be positively compared with its peers before it earns traffic
-    if peer is None or peer.z_weak > -settings.DID_PASS_Z:  # not significantly (p<0.05) below the materiality line
+    if peer is None or (peer.q >= settings.DID_PASS_RATIO and peer.z_weak > -settings.DID_PASS_Z):
         return TESTED
     return SUSPECT
 

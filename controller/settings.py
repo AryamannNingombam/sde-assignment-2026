@@ -97,8 +97,11 @@ DID_WEAK_MIN_DIALS = 150
 # Materiality of a weak base: a DID whose pickup at comparable load is >= 15% below its peers costs, at a 3-way
 # split, 5% = 2.5x the 2% guardrail, so removing it is clearly worth an approval slot; smaller gaps are not.
 DID_WEAK_MARGIN = 0.15
-# Passing = NOT significantly (one-sided p<0.05) below the same (1 - margin) line. A point-estimate rule would fail ~1 in 6
-# healthy DIDs at the minimum n (se of a pickup ratio at n=100 is ~15%) and strand them as 'suspect' forever.
+# Passing needs the point estimate of the load-adjusted pickup ratio above 1 - 1.5 x margin (= 0.775: halfway
+# between "healthy" and the materiality line, widened by the ~15% standard error at the minimum n=100) AND not
+# significantly (one-sided p<0.05) below the materiality line. A DID that misses the bar is "suspect": it keeps at
+# most the probe cap and is re-judged every tick as its n grows, so a healthy DID is delayed, never stranded.
+DID_PASS_RATIO = 1.0 - 1.5 * DID_WEAK_MARGIN
 DID_PASS_Z = 1.645
 DID_WEAK_WINDOW_HOURS = 48
 DID_WEAK_LOAD_SLACK = 1.25  # "comparable load": own load <= peers' load x slack
@@ -123,6 +126,7 @@ HALLUC_MIN_CONNECTS = 200
 HALLUC_ADHERENCE_DROP = 0.02
 HALLUC_WINDOW_MINUTES = 1440  # rolling window for drift
 HALLUC_VERIFY_MIN_CONNECTS = 400  # non-inferiority needs n: se(0.6%, n=400) ~ 0.4% << margin
+HALLUC_VERIFY_MAX_CONNECTS = 1500  # non-inferiority at a 1pp margin needs ~1000 connects when the base rate is ~2%; past this the fix fails
 HALLUC_VERIFY_P = 0.01
 HALLUC_BASELINE_MIN_CONNECTS = 200  # a prompt needs this much history to count as a baseline
 ENGAGEMENT_VERIFY_MAX_DROP = 0.02  # absolute; overridden by the workflow's own guardrail if it names engagement
