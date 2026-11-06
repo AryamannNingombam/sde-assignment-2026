@@ -68,6 +68,10 @@ Veto = Callable[[PlanContext, str, str], "str | None"]  # (ctx, workflow_id, pro
 FAIL_OPEN_MARKERS = ("harm_stop", "rollback", "evacuation", "halluc", "incident", "revert")
 
 
+class VetoCrash(str):
+    """A veto reason that means the hook itself crashed (not a real stale-evidence veto): the approval is kept."""
+
+
 def _report_failure(ctx: PlanContext, code: str, name: str, wid: str | None, exc: Exception) -> None:
     """Log with traceback, write one alert + decision per sim day per (name, workflow). Never raises."""
     log.exception("%s: %s on %s", code, name, wid)
@@ -113,7 +117,8 @@ class Registry:
                 _report_failure(ctx, "veto_failed", _name(fn), workflow_id, exc)
                 if any(m in kind for m in FAIL_OPEN_MARKERS):
                     continue
-                return f"apply-time check {_name(fn)} failed ({type(exc).__name__}); routine change withheld until it recovers"
+                return VetoCrash(f"apply-time check {_name(fn)} failed ({type(exc).__name__}); "
+                                 "routine change withheld until it recovers")
             if reason:
                 return reason
         return None

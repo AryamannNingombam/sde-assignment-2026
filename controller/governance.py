@@ -20,7 +20,7 @@ from typing import Any, Mapping
 
 from . import client as c
 from . import settings
-from .desired import Priority
+from .desired import Priority, VetoCrash
 from .fatigue import filing_window_ok, slot_available, soft_cap_ignored
 from .faults import crash_point
 from .ingest import ts_to_minute
@@ -399,6 +399,8 @@ class Governance:
             elif self.live(row.workflow_id)[0] != row.base_version:
                 self.repo.transition(row, STALE, now, "base version changed; /apply NOT called")
             elif (reason := self.veto_check(row, now) if self.veto_check else None):
+                if isinstance(reason, VetoCrash) and self._veto_crash_retry(row, now, reason):
+                    continue  # the hook crashed, not the evidence: keep the approval, retry next tick
                 self.store.add_decision(now, "apply_withheld", f"{row.proposal_id}: /apply NOT called: {reason}",
                                         row.workflow_id, {"proposal_id": row.proposal_id, "reason": reason})
                 self.repo.transition(row, SUPERSEDED, now, f"withheld at apply time: {reason}")
@@ -407,6 +409,13 @@ class Governance:
                 if applied is not None:
                     done.append(applied)
         return done
+
+    def _veto_crash_retry(self, row: ProposalRow, now: int, reason: str) -> bool:
+        """Count a veto-hook crash on this approval; True while retries remain (never past apply_by, which
+        the caller checks first on every tick)."""
+        crashes = sum(1 for e in self.repo.events(row.proposal_id) if e[1] == "veto_crashed") + 1
+        self.repo.log_only(row, "veto_crashed", now, {"n": crashes, "reason": reason})
+        return crashes <= settings.VETO_CRASH_MAX_RETRIES
 
     def _apply(self, row: ProposalRow, now: int) -> ProposalRow | None:
         self.repo.log_only(row, "apply_intent", now, {"approval_id": row.approval_id})

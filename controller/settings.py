@@ -230,3 +230,7 @@ PERSON_MIN_BLOCKS = 2  # ... spread over at least this many hour blocks
 PERSON_PRIOR_STRENGTH = 20.0  # PRIOR (documented in docs/THRESHOLDS.md): pseudo-dials of the cohort block profile
 PERSON_PASS_PROB = 0.8  # would-assign only if P(best block pickup > cohort average) >= this
 PERSON_MAX_ROWS_PER_WORKFLOW = 50_000  # cap on persisted per-person rows (bounded table)
+
+# --- floor fixes D ---
+SUBMIT_FAILED_BACKOFF_URGENT_MIN = 30  # incident approval-route resend delay after a failed send (fixed, no doubling)
+VETO_CRASH_MAX_RETRIES = 3  # a crashing apply-time veto hook keeps an approval alive this many ticks before it is withheld
