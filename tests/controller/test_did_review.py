@@ -114,3 +114,14 @@ def test_reprobed_did_without_a_peer_comparison_never_passes():
     ev = de.Evaluation(500, FatigueCurve.flat(), {})
     ev.total_dials, ev.first_hour = {"D2": 500}, {"D2": 100}  # plenty of dials and age, but no comparison yet
     assert did.status_of(ev, "D2", st) == dp.REPROBE
+
+
+def test_evaluate_handles_a_reprobe_window_longer_than_the_default_span():
+    from controller.detectors.did_data import DidSeries
+    ser = DidSeries()
+    for h in range(0, 200):
+        if 9 <= h % 24 < 21:
+            ser.dials[h] = {"D1": 100, "D2": 100, "D3": 3 if h >= 40 else 0}
+            ser.conns[h] = {"D1": 30, "D2": 30, "D3": 1 if h >= 40 else 0}
+    ev = de.evaluate(ser, FatigueCurve.flat(), 199, ["D1", "D2", "D3"], ["D3"], [], {"D3": 40})
+    assert ev.total_dials["D3"] > 0 and ev.first_hour["D3"] >= 40
