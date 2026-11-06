@@ -1,6 +1,7 @@
 """Per-lead, per-arm counts for the experiment tests, straight from the ``calls`` table (R7: our own store)."""
 from __future__ import annotations
 
+import json
 from typing import Sequence
 
 from . import settings
@@ -49,9 +50,79 @@ def _flatten(strata: dict[str, dict[int, tuple[float, float]]]) -> dict[int, tup
     return out
 
 
+def _scan(store: Store, wid: str, col: str, day_sql: str, day_args: list, start_minute: int,
+          cf: str, cargs: list) -> tuple[list, list]:
+    base = f" FROM calls WHERE workflow_id=? AND {day_sql} AND ts_minute>=?{cf}"
+    args = [wid, *day_args, start_minute, *cargs]
+    eng = store.conn.execute(f"SELECT {col}, {_STRATUM}, lid, COUNT(*), SUM(engaged){base} AND connected=1"
+                             f" GROUP BY {col}, {_STRATUM}, lid", args).fetchall()
+    pick = store.conn.execute(f"SELECT {col}, lid, COUNT(*), SUM(connected){base} GROUP BY {col}, lid", args).fetchall()
+    return eng, pick
+
+
+def _day_counts(store: Store, wid: str, col: str, day: int, cells: Sequence[int] | None, cf: str,
+                cargs: list) -> tuple[list, list]:
+    """Arm counts of ONE completed day, computed once and cached (a finished day never changes)."""
+    key = json.dumps(sorted(cells)) if cells is not None else "-"
+    row = store.conn.execute("SELECT payload FROM exp_day_cache WHERE workflow_id=? AND day=? AND col=? AND cells=?",
+                             (wid, day, col, key)).fetchone()
+    if row is not None:
+        data = json.loads(row[0])
+        return data["e"], data["p"]
+    eng, pick = _scan(store, wid, col, "day=?", [day], day * DAY, cf, cargs)
+    store.conn.execute("INSERT OR REPLACE INTO exp_day_cache(workflow_id, day, col, cells, payload) VALUES (?,?,?,?,?)",
+                       (wid, day, col, key, json.dumps({"e": eng, "p": pick})))
+    return eng, pick
+
+
 def load_arms(store: Store, wid: str, dim: str, start_minute: int, now: int,
               cells: Sequence[int] | None = None) -> dict[str, ArmData]:
     """Arm data for calls at or after ``start_minute`` (``recent`` = the last EXP_RECENT_MINUTES).
+
+    Engagement is also returned per stratum (day x the config version live at the call = share regime),
+    so contrasts can be Mantel-Haenszel pooled. Days that are complete and wholly inside the window are
+    served from ``exp_day_cache`` (identical to a raw scan); only the partial first day and today are scanned,
+    so the per-tick cost stops growing with the length of the experiment.
+    """
+    col = column(dim)
+    cf, cargs = _cell_filter(cells)
+    today, first = now // DAY, start_minute // DAY
+    full = [d for d in range(first, today) if d * DAY >= start_minute]
+    rest = [d for d in range(first, today + 1) if d not in set(full)]
+    eng_rows: list = []
+    pick_rows: list = []
+    for d in full:
+        e, p = _day_counts(store, wid, col, d, cells, cf, cargs)
+        eng_rows += e
+        pick_rows += p
+    if rest:
+        e, p = _scan(store, wid, col, f"day IN ({','.join('?' * len(rest))})", rest, start_minute, cf, cargs)
+        eng_rows += e
+        pick_rows += p
+    eng_s: dict = {}
+    for arm, stratum, lid, n, x in eng_rows:
+        slot = eng_s.setdefault(arm, {}).setdefault(str(stratum), {})
+        a = slot.get(lid, (0.0, 0.0))
+        slot[lid] = (a[0] + n, a[1] + x)
+    pick: dict = {}
+    for arm, lid, n, c in pick_rows:
+        slot = pick.setdefault(arm, {})
+        a = slot.get(lid, (0.0, 0.0))
+        slot[lid] = (a[0] + n, a[1] + c)
+    recent_from = max(start_minute, now - settings.EXP_RECENT_MINUTES)
+    rec_s = _group_strata(store, f"SELECT {col}, {_STRATUM}, lid, COUNT(*), SUM(engaged) FROM calls WHERE workflow_id=?"
+                                 f" AND day>=? AND ts_minute>=?{cf} AND connected=1 GROUP BY {col}, {_STRATUM}, lid",
+                          [wid, recent_from // DAY, recent_from, *cargs])
+    return {arm: ArmData(_flatten(eng_s.get(arm, {})), _flatten(rec_s.get(arm, {})), pick.get(arm, {}),
+                         eng_s.get(arm, {}), rec_s.get(arm, {}))
+            for arm in sorted(set(eng_s) | set(pick) | set(rec_s))}
+
+
+def _load_arms_raw(store: Store, wid: str, dim: str, start_minute: int, now: int,
+              cells: Sequence[int] | None = None) -> dict[str, ArmData]:
+    """Reference implementation: one scan of ``calls`` (tests compare the cached path against it).
+
+    Arm data for calls at or after ``start_minute`` (``recent`` = the last EXP_RECENT_MINUTES).
 
     Engagement is also returned per stratum (day x the config version live at the call = share regime),
     so contrasts can be Mantel-Haenszel pooled.

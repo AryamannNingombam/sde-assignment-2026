@@ -211,3 +211,13 @@ CREATE TABLE IF NOT EXISTS metrics (
     tick_wall_s REAL NOT NULL,
     step_minutes INTEGER NOT NULL
 );
+
+-- Per completed day arm counts for the experiment tests (derived from calls; safe to drop).
+CREATE TABLE IF NOT EXISTS exp_day_cache (
+    workflow_id TEXT NOT NULL,
+    day INTEGER NOT NULL,
+    col TEXT NOT NULL,
+    cells TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (workflow_id, day, col, cells)
+);
