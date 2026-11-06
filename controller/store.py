@@ -129,6 +129,16 @@ class Store:
     def has_config_body(self, workflow_id: str, version: int) -> bool:
         return self.config_body(workflow_id, version) is not None
 
+    # ---------------------------------------------------------------- jobs
+    def get_job(self, name: str, workflow_id: str = "") -> int | None:
+        row = self.conn.execute("SELECT last_run_minute FROM jobs WHERE name=? AND workflow_id=?",
+                                (name, workflow_id)).fetchone()
+        return row[0] if row else None
+
+    def set_job(self, name: str, workflow_id: str, minute: int) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO jobs(name, workflow_id, last_run_minute)"
+                          " VALUES (?,?,?)", (name, workflow_id, minute))
+
     # ---------------------------------------------------------------- audit
     def add_decision(self, sim_minute: int, kind: str, summary: str,
                      workflow_id: str | None = None, inputs: Any = None) -> None:

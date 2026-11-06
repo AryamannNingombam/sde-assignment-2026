@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import settings
+from . import audit, settings
 from .client import SimClient, SimUnavailable
 from .loop import Controller
 from .store import Store
@@ -46,11 +46,32 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    dbs = sorted(Path(args.state_dir).glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not dbs:
+def _latest_db(state_dir: str) -> Path | None:
+    dbs = sorted(Path(state_dir).glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return dbs[0] if dbs else None
+
+
+def cmd_why(args: argparse.Namespace) -> int:
+    db = _latest_db(args.state_dir)
+    if db is None:
         print(f"no state databases in {args.state_dir}")
         return 1
+    try:
+        minute = audit.parse_at(args.at)
+    except ValueError as exc:
+        print(exc)
+        return 2
+    with Store(db) as store:
+        print(audit.render(audit.why(store, args.workflow, minute)))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    db = _latest_db(args.state_dir)
+    if db is None:
+        print(f"no state databases in {args.state_dir}")
+        return 1
+    dbs = [db]
     store = Store(dbs[0])
     cursor = store.get_cursor()
     out = {"db": str(dbs[0]), "cursor": {"chunk": cursor.last_chunk, "event_id": cursor.last_event_id},
@@ -73,11 +94,15 @@ def main(argv: list[str] | None = None) -> int:
                      help="dev: stop (exit 0) after this many simulated minutes from now")
     status = sub.add_parser("status")
     status.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    why = sub.add_parser("why", help="explain which config was active at a time and why")
+    why.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    why.add_argument("--workflow", required=True)
+    why.add_argument("--at", required=True, help='e.g. "Day 3 14:00"')
     args = ap.parse_args(argv)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    return cmd_run(args) if args.cmd == "run" else cmd_status(args)
+    return {"run": cmd_run, "status": cmd_status, "why": cmd_why}[args.cmd](args)
 
 
 if __name__ == "__main__":

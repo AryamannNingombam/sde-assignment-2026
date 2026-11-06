@@ -1,6 +1,8 @@
 """The controller loop: fixed per-tick order (CONTEXT section 8, C9).
 
-reconcile (stub) -> ingest -> detectors/planner (flagged off, stubs) -> metrics -> advance.
+reconcile -> ingest -> apply approved -> detectors -> planner/submit -> metrics -> advance.
+Detectors and producers come from a registry (empty by default: the controller then changes
+nothing); governance reconciliation runs at startup and on every tick.
 """
 from __future__ import annotations
 
@@ -10,6 +12,10 @@ from dataclasses import dataclass, field
 
 from . import settings
 from .client import AdvanceNotApplied, Finished, SimClient
+from .desired import DEFAULT_REGISTRY, Registry
+from .faults import crash_point
+from .governance import Governance
+from .planner import Planner
 from .ingest import IngestStats, Ingestor, mirror_configs
 from .store import Store
 from .world_id import note_progress
@@ -73,8 +79,11 @@ class RunResult:
 
 class Controller:
     def __init__(self, client: SimClient, store: Store, ingestor: Ingestor | None = None,
-                 stop_at_minute: int | None = None) -> None:
+                 stop_at_minute: int | None = None, registry: Registry | None = None) -> None:
         self.client = client
+        self.registry = registry if registry is not None else DEFAULT_REGISTRY
+        self.gov: Governance | None = None
+        self.planner: Planner | None = None
         self.store = store
         self.ingestor = ingestor or Ingestor(client, store)
         self.stop_at_minute = stop_at_minute
@@ -91,6 +100,9 @@ class Controller:
         self._workflow_ids = [w["workflow_id"] for w in workflows]
         self.windows = Windows.from_workflows(workflows)
         mirror_configs(self.client, self.store, self._workflow_ids)
+        self.gov = Governance(self.client, self.store, {w["workflow_id"]: w for w in workflows})
+        self.planner = Planner(self.client, self.store, self.gov, self.registry)
+        self.gov.reconcile(state["sim_minute"])  # resolve anything a previous run left in flight
         stats = self.ingestor.sync()
         self.store.add_decision(state["sim_minute"], "startup",
                                 f"startup: ingested {stats.events} events in {stats.chunks} chunks",
@@ -100,24 +112,28 @@ class Controller:
         return stats
 
     # ------------------------------------------------------------ per tick
-    def reconcile(self) -> None:
-        """Governance reconciliation (Phase 2)."""
-
-    def detect_and_plan(self) -> None:
-        """Detectors and planner stubs; every lever is behind a feature flag (all off)."""
-
     def in_flight(self) -> bool:
-        return False
+        return self.gov is not None and self.gov.any_in_flight()
+
+    def plan_and_submit(self, now: int) -> None:
+        """Detectors, planner and submission (steps 4-6 of the tick)."""
+        assert self.planner is not None
+        self.planner.run_detectors(now)
+        self.planner.plan(now)
 
     def tick(self) -> tuple[bool, IngestStats]:
         """One loop iteration. Returns ``(finished_and_drained, stats)``."""
         t0 = time.perf_counter()
         state = self._last_state = self.client.state()
         note_progress(self.store, state)
-        self.reconcile()
-        stats = self.ingestor.sync()
-        self.detect_and_plan()
+        assert self.gov is not None
+        now = state["sim_minute"]
         finished = state["finished"]
+        self.gov.reconcile(now)
+        stats = self.ingestor.sync()
+        if not finished:
+            self.gov.apply_approved(now)
+            self.plan_and_submit(now)
         hit_stop = self.stop_at_minute is not None and state["sim_minute"] >= self.stop_at_minute
         step = 0
         if not (finished or hit_stop):
@@ -157,6 +173,7 @@ class Controller:
             self.store.add_decision(minute, "advance_recovered",
                                     "advance transport error; sim_minute had moved")
         self._advance_returned = time.monotonic()
+        crash_point("after-advance-before-ingest")
         return False
 
     # ------------------------------------------------------------ run
