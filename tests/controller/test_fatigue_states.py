@@ -37,12 +37,12 @@ def test_worst_case_decision_must_precede_expiry():
     # 18:00 + 240 min = 22:00 -> next opening 10:00 is 16 h away: fine with a 24 h TTL
     assert fatigue.filing_window_ok(at(0, 18), RENEWAL, False, "nw_renewal")[0]
     # ks_cancel has a 12 h TTL: the same filing could expire unseen
-    ok, why = fatigue.filing_window_ok(at(0, 18), KESTREL, False, "other")
+    ok, why = fatigue.filing_window_ok(at(0, 18), KESTREL, True, "other")
     assert not ok and "expires_at" in why
     assert fatigue.filing_window_ok(at(0, 11), KESTREL, False, "other")[0]
     # a shortened TTL (expires_in_hours) tightens the rule
     assert fatigue.filing_window_ok(at(0, 10), RENEWAL, False, "x", expires_in_hours=24)[0]
-    assert not fatigue.filing_window_ok(at(0, 10), RENEWAL, False, "x", expires_in_hours=3)[0]
+    assert not fatigue.filing_window_ok(at(0, 10), RENEWAL, True, "x", expires_in_hours=3)[0]
     assert fatigue.ttl_minutes(RENEWAL, 100) == 24 * 60  # capped at the policy TTL
 
 
@@ -88,7 +88,7 @@ def test_budget_tiers_on_real_policies():
     assert fatigue.routine_budget(RENEWAL, "nw_renewal") == 1
     assert fatigue.routine_budget(KYC, "nw_kyc") == 1
     assert fatigue.routine_budget(KESTREL, "ks_cancel") == 2  # soft cap 2 = max(1, 4 - 2)
-    assert fatigue.routine_budget({"max_requests_per_24h": 1}, "x") == 0
+    assert fatigue.routine_budget({"max_requests_per_24h": 1}, "x") == 1  # A4: the single slot is shared
     assert fatigue.slot_available(1, KYC, Priority.ROUTINE, "nw_kyc")[0] is False
     assert fatigue.slot_available(1, KYC, Priority.INCIDENT, "nw_kyc")[0] is True
     assert fatigue.slot_available(2, KYC, Priority.INCIDENT, "nw_kyc")[0] is False

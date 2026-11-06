@@ -21,7 +21,7 @@ from typing import Any, Mapping
 from . import client as c
 from . import settings
 from .desired import Priority
-from .fatigue import filing_window_ok, slot_available
+from .fatigue import filing_window_ok, slot_available, soft_cap_ignored
 from .faults import crash_point
 from .ingest import ts_to_minute
 from .proposal_repo import (
@@ -95,6 +95,9 @@ class Governance:
         ok, why = slot_available(self.requests_used(wid, now), gov, priority, wid)
         if not ok:
             return False, why
+        ignored = soft_cap_ignored(gov, wid, expires_in_hours)
+        if ignored and routine and self.note_once(f"softcap:{wid}", now):
+            self.store.add_decision(now, "soft_cap_ignored", f"soft cap not honoured: {ignored}", wid)
         return filing_window_ok(now, gov, routine, wid, expires_in_hours)
 
     def _lookup_validation(self, run_id: str) -> dict | None:
