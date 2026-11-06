@@ -16,6 +16,7 @@ from .client import AdvanceNotApplied, Finished, SimClient
 from . import levers  # noqa: F401  (registers the Phase 3 detectors on the default registry)
 from .desired import DEFAULT_REGISTRY, Registry
 from .faults import crash_point
+from .alerts import TickObserver
 from .governance import Governance
 from .planner import Planner
 from .ingest import IngestStats, Ingestor, mirror_configs
@@ -94,6 +95,7 @@ class Controller:
         self._advance_returned = time.monotonic()
         self._last_state: dict = {}
         self._saw_finished = False
+        self.observer = TickObserver(client, store)
 
     # ------------------------------------------------------------ startup
     def startup(self) -> IngestStats:
@@ -147,6 +149,7 @@ class Controller:
             step = choose_step(state["sim_minute"], state["end_minute"], self.windows,
                                self.in_flight(), state.get("tick_minutes", settings.TICK_MINUTES))
         self._record_metrics(state["sim_minute"], stats, t0, step)
+        self.observer.after_tick(state, now)  # metrics_ext + alert rules (never raises)
         if finished:
             self.store.add_decision(state["sim_minute"], "finished", "scenario finished; exiting 0")
             return True, stats

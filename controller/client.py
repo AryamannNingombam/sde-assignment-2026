@@ -131,13 +131,31 @@ class SimClient:
             http = httpx.Client(base_url=base_url, timeout=settings.HTTP_TIMEOUT_S)
         self._http = http
         self._sleep = sleep
+        self.counters: dict[str, int] = {}  # local error tally for observability: "5xx", "transport", "4xx", "409", "403"
 
     def close(self) -> None:
         self._http.close()
 
     # ------------------------------------------------------------ plumbing
     def _once(self, method: str, path: str, **kw: Any) -> httpx.Response:
-        return self._http.request(method, path, **kw)
+        try:
+            resp = self._http.request(method, path, **kw)
+        except (httpx.TransportError, httpx.TimeoutException):
+            self._count("transport")
+            raise
+        self._count_status(resp.status_code)
+        return resp
+
+    def _count(self, key: str) -> None:
+        self.counters[key] = self.counters.get(key, 0) + 1
+
+    def _count_status(self, status: int) -> None:
+        if status >= 500:
+            self._count("5xx")
+        elif status >= 400:
+            self._count("4xx")
+            if status in (403, 409):
+                self._count(str(status))
 
     def _request(self, method: str, path: str, retry: bool = True, **kw: Any) -> httpx.Response:
         if not retry:
