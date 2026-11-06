@@ -12,6 +12,7 @@ from . import settings
 from .client import AdvanceNotApplied, Finished, SimClient
 from .ingest import IngestStats, Ingestor, mirror_configs
 from .store import Store
+from .world_id import note_progress
 
 log = logging.getLogger(__name__)
 _MAX_ADVANCE_FAILURES = 5
@@ -31,32 +32,35 @@ class Windows:
         for wf in workflows:
             dialling = wf.get("dialling_window")
             approver = (wf.get("governance") or {}).get("approver_hours")
-            for span in (dialling, approver):
-                if span and len(span) == 2:
-                    spans.append((int(span[0]), int(span[1])))
-                else:
-                    unknown = True
+            if dialling and len(dialling) == 2:
+                spans.append((int(dialling[0]), int(dialling[1])))
+            else:
+                unknown = True  # cannot tell when this workflow dials: always active
+            if approver and len(approver) == 2:  # a missing approver window only drops its own span
+                spans.append((int(approver[0]), int(approver[1])))
         return cls(tuple(spans), unknown)
 
     def active_at(self, minute: int) -> bool:
         tod = minute % settings.MINUTES_PER_DAY
         return self.unknown or any(s * 60 <= tod < e * 60 for s, e in self.spans)
 
-    def minutes_to_next_boundary(self, minute: int) -> int:
+    def minutes_to_next_boundary(self, minute: int, tick: int = settings.TICK_MINUTES) -> int:
         """Minutes until the next window start (searching up to one day ahead)."""
-        for ahead in range(settings.TICK_MINUTES, settings.MINUTES_PER_DAY + 1, settings.TICK_MINUTES):
+        for ahead in range(tick, settings.MINUTES_PER_DAY + 1, tick):
             if self.active_at(minute + ahead):
                 return ahead
         return settings.MINUTES_PER_DAY
 
 
-def choose_step(minute: int, end_minute: int, windows: Windows, in_flight: bool) -> int:
-    """15 minutes, or up to 60 when idle outside every window with nothing in flight."""
-    step = settings.TICK_MINUTES
+def choose_step(minute: int, end_minute: int, windows: Windows, in_flight: bool,
+                tick: int = settings.TICK_MINUTES) -> int:
+    """One tick, or up to 60 min when idle outside every window with nothing in flight."""
+    step = tick
     if not in_flight and not windows.active_at(minute):
-        step = min(settings.LONG_STEP_MINUTES, windows.minutes_to_next_boundary(minute))
+        step = min(max(settings.LONG_STEP_MINUTES // tick, 1) * tick,
+                   windows.minutes_to_next_boundary(minute, tick))
     step = min(step, end_minute - minute)
-    return max(step, settings.TICK_MINUTES)
+    return max(step, tick)
 
 
 @dataclass
@@ -77,6 +81,8 @@ class Controller:
         self.windows = Windows(())
         self._workflow_ids: list[str] = []
         self._advance_returned = time.monotonic()
+        self._last_state: dict = {}
+        self._saw_finished = False
 
     # ------------------------------------------------------------ startup
     def startup(self) -> IngestStats:
@@ -90,6 +96,7 @@ class Controller:
                                 f"startup: ingested {stats.events} events in {stats.chunks} chunks",
                                 inputs={"workflows": self._workflow_ids,
                                         "cursor": self.store.get_cursor().last_event_id})
+        self._advance_returned = time.monotonic()  # lag is measured from here, not from import
         return stats
 
     # ------------------------------------------------------------ per tick
@@ -105,7 +112,8 @@ class Controller:
     def tick(self) -> tuple[bool, IngestStats]:
         """One loop iteration. Returns ``(finished_and_drained, stats)``."""
         t0 = time.perf_counter()
-        state = self.client.state()
+        state = self._last_state = self.client.state()
+        note_progress(self.store, state)
         self.reconcile()
         stats = self.ingestor.sync()
         self.detect_and_plan()
@@ -114,7 +122,7 @@ class Controller:
         step = 0
         if not (finished or hit_stop):
             step = choose_step(state["sim_minute"], state["end_minute"], self.windows,
-                               self.in_flight())
+                               self.in_flight(), state.get("tick_minutes", settings.TICK_MINUTES))
         self._record_metrics(state["sim_minute"], stats, t0, step)
         if finished:
             self.store.add_decision(state["sim_minute"], "finished", "scenario finished; exiting 0")
@@ -123,26 +131,33 @@ class Controller:
             self.store.add_decision(state["sim_minute"], "stopped",
                                     f"stop_at_minute {self.stop_at_minute} reached")
             return True, stats
-        self._advance(state["sim_minute"], step)
+        if self._advance(state["sim_minute"], step):
+            self.store.add_decision(state["sim_minute"], "finished",
+                                    "advance reported finished; exiting 0")
+            self._last_state = {**state, "finished": True}
+            self._saw_finished = True
+            return True, stats + self.ingestor.sync()  # drain what the final advance produced
         return False, stats
 
     def _record_metrics(self, minute: int, stats: IngestStats, t0: float, step: int) -> None:
         now = time.perf_counter()
-        lag = time.monotonic() - self._advance_returned
+        lag = max(0.0, time.monotonic() - self._advance_returned)
         self.store.add_metric(minute, stats.events, stats.wall_s, lag, now - t0, step)
 
-    def _advance(self, minute: int, step: int) -> None:
+    def _advance(self, minute: int, step: int) -> bool:
+        """Advance; returns True if the sim reported ``finished``."""
         self.store.add_decision(minute, "advance_intent", f"advance {step} min from {minute}",
                                 inputs={"target": minute + step})
         try:
             result = self.client.advance(step)
         except Finished:
             log.info("advance reported finished")
-            return
+            return True
         if result.get("recovered"):
             self.store.add_decision(minute, "advance_recovered",
                                     "advance transport error; sim_minute had moved")
         self._advance_returned = time.monotonic()
+        return False
 
     # ------------------------------------------------------------ run
     def run(self) -> RunResult:
@@ -163,5 +178,5 @@ class Controller:
             ticks += 1
             total += stats
             if done:
-                minute = self.client.state()["sim_minute"]
-                return RunResult(self.client.state()["finished"], ticks, minute, total)
+                final = self.client.state()  # one read for both fields
+                return RunResult(final["finished"] or self._saw_finished, ticks, final["sim_minute"], total)

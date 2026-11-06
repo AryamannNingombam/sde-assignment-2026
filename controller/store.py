@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,8 +10,13 @@ from typing import Any, Iterable
 
 from . import settings
 
+log = logging.getLogger(__name__)
 SCHEMA_VERSION = "1"
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+_PROPOSAL_COLUMNS = (("route", "TEXT"), ("priority", "INTEGER"), ("plan_seq", "INTEGER"),
+                     ("filed_minute", "INTEGER"), ("apply_by_minute", "INTEGER"),
+                     ("expires_minute", "INTEGER"), ("supersedes", "TEXT"),
+                     ("applied_version", "INTEGER"), ("applied_minute", "INTEGER"))
 
 
 @dataclass(frozen=True)
@@ -40,11 +46,31 @@ class Store:
         self.conn.execute(f"PRAGMA wal_autocheckpoint={settings.WAL_AUTOCHECKPOINT_PAGES}")
         self.conn.execute(f"PRAGMA cache_size=-{settings.SQLITE_CACHE_KB}")
         self.conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate()
         if self.get_meta("schema_version") is None:
             self.set_meta("schema_version", SCHEMA_VERSION)
 
     def close(self) -> None:
         self.conn.close()
+
+    def __enter__(self) -> "Store":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _migrate(self) -> None:
+        """Bring databases created by earlier phases up to the current schema."""
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(proposal_events)")}
+        if "event_id" not in have:
+            self.conn.execute("ALTER TABLE proposal_events ADD COLUMN event_id INTEGER")
+        prop = {r[1] for r in self.conn.execute("PRAGMA table_info(proposals)")}
+        for col, typ in _PROPOSAL_COLUMNS:
+            if col not in prop:
+                self.conn.execute(f"ALTER TABLE proposals ADD COLUMN {col} {typ}")
+        # a replayed approval_decided event can never insert twice (NULL ids stay distinct)
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS proposal_events_event_id"
+                          " ON proposal_events (event_id)")
 
     def transaction(self) -> "_Txn":
         return _Txn(self.conn)
@@ -152,6 +178,16 @@ class _Txn:
         self._conn.execute("BEGIN IMMEDIATE")
         return self._conn
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        self._conn.execute("ROLLBACK" if exc_type else "COMMIT")
-        return False
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type:
+            self._conn.execute("ROLLBACK")
+            return None
+        try:
+            self._conn.execute("COMMIT")
+        except Exception:
+            try:  # leave the connection usable; the original COMMIT error propagates
+                self._conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.exception("ROLLBACK after failed COMMIT also failed")
+            raise
+        return None

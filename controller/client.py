@@ -3,8 +3,12 @@
 Policy:
 * 5xx and transport errors: bounded exponential backoff, then raise
   ``SimUnavailable``.
-* ``POST /sim/advance`` is never retried. On a transport/5xx failure we re-read
-  ``GET /sim/state`` and treat the advance as done only if ``sim_minute`` moved.
+* ``POST /sim/advance`` is never retried. On a transport/5xx failure we poll
+  ``GET /sim/state`` until ``sim_minute`` is stable across two reads (bounded
+  time) and let the caller continue from the observed minute.
+* Non-idempotent or credit-costing calls (approvals, apply, PUT config,
+  suggest-fixes, validation runs) are never retried; a transport/5xx failure
+  raises ``OutcomeUnknown`` so governance can reconcile.
 * 4xx responses raise typed exceptions carrying the JSON body; never retried.
 """
 from __future__ import annotations
@@ -78,6 +82,16 @@ class SimUnavailable(Exception):
     """Transport failure or 5xx persisted through the retry budget."""
 
 
+class OutcomeUnknown(Exception):
+    """A non-retryable mutation failed in transit: it may or may not have happened."""
+
+    def __init__(self, method: str, path: str, cause: object) -> None:
+        super().__init__(f"{method} {path} outcome unknown: {cause}")
+        self.method = method
+        self.path = path
+        self.cause = cause
+
+
 class AdvanceNotApplied(Exception):
     """Advance failed and ``sim_minute`` did not move."""
 
@@ -125,7 +139,9 @@ class SimClient:
     def _once(self, method: str, path: str, **kw: Any) -> httpx.Response:
         return self._http.request(method, path, **kw)
 
-    def _request(self, method: str, path: str, **kw: Any) -> httpx.Response:
+    def _request(self, method: str, path: str, retry: bool = True, **kw: Any) -> httpx.Response:
+        if not retry:
+            return self._request_once(method, path, **kw)
         delay = settings.RETRY_BASE_DELAY_S
         last: Exception | None = None
         for attempt in range(1, settings.RETRY_ATTEMPTS + 1):
@@ -145,8 +161,20 @@ class SimClient:
                 delay = min(delay * 2, settings.RETRY_MAX_DELAY_S)
         raise SimUnavailable(f"{method} {path} failed after retries: {last}")
 
-    def _json(self, method: str, path: str, **kw: Any) -> Any:
-        return self._request(method, path, **kw).json()
+    def _request_once(self, method: str, path: str, **kw: Any) -> httpx.Response:
+        """Single attempt for non-idempotent calls; transport/5xx -> OutcomeUnknown."""
+        try:
+            resp = self._once(method, path, **kw)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            raise OutcomeUnknown(method, path, exc) from exc
+        if resp.status_code >= 500:
+            raise OutcomeUnknown(method, path, f"status {resp.status_code}")
+        if resp.status_code >= 400:
+            raise _error_from(resp)
+        return resp
+
+    def _json(self, method: str, path: str, retry: bool = True, **kw: Any) -> Any:
+        return self._request(method, path, retry=retry, **kw).json()
 
     # ------------------------------------------------------------ read API
     def health(self) -> dict:
@@ -216,27 +244,52 @@ class SimClient:
             failure: Exception = SimUnavailable(f"advance returned {resp.status_code}")
         except (httpx.TransportError, httpx.TimeoutException) as exc:
             failure = exc
-        log.warning("advance failed (%s); re-reading sim state", failure)
-        after = self.state()
+        log.warning("advance failed (%s); waiting for sim_minute to settle", failure)
+        after = self.settled_state()
         if after["sim_minute"] > before:
             return {"sim_minute": after["sim_minute"], "ts": after["ts"],
                     "finished": after["finished"], "new_chunks": [], "recovered": True}
         raise AdvanceNotApplied(f"advance failed and sim_minute stayed {before}: {failure}")
 
+    def settled_state(self) -> dict:
+        """Poll ``/sim/state`` until ``sim_minute`` is equal across two reads (bounded time).
+
+        A timed-out advance may still be running server-side, so one read is not enough.
+        """
+        deadline = time.monotonic() + settings.ADVANCE_SETTLE_MAX_S
+        prev: dict | None = None
+        while True:
+            try:
+                cur = self.state()
+            except SimUnavailable:
+                cur = None
+            if cur is not None and prev is not None and cur["sim_minute"] == prev["sim_minute"]:
+                return cur
+            if cur is not None:
+                prev = cur
+            if time.monotonic() >= deadline:
+                if prev is None:
+                    raise SimUnavailable("sim state unreadable while settling advance")
+                return prev
+            self._sleep(settings.ADVANCE_SETTLE_POLL_S)
+
+    def credits_remaining(self) -> float:
+        return float(self.state()["credits_remaining"])
+
     def request_approval(self, body: dict) -> dict:
-        return self._json("POST", "/approvals", json=body)
+        return self._json("POST", "/approvals", retry=False, json=body)
 
     def apply_approval(self, workflow_id: str, approval_id: str) -> dict:
-        return self._json("POST", f"/workflows/{workflow_id}/apply",
+        return self._json("POST", f"/workflows/{workflow_id}/apply", retry=False,
                           json={"approval_id": approval_id})
 
     def put_config(self, workflow_id: str, body: dict) -> dict:
-        return self._json("PUT", f"/workflows/{workflow_id}/config", json=body)
+        return self._json("PUT", f"/workflows/{workflow_id}/config", retry=False, json=body)
 
     def suggest_fixes(self, workflow_id: str, problem: str) -> dict:
-        return self._json("POST", "/llm/suggest-fixes",
+        return self._json("POST", "/llm/suggest-fixes", retry=False,
                           json={"workflow_id": workflow_id, "problem": problem})
 
     def run_validation(self, workflow_id: str, prompt_version: str, n: int) -> dict:
-        return self._json("POST", "/validation/runs",
+        return self._json("POST", "/validation/runs", retry=False,
                           json={"workflow_id": workflow_id, "prompt_version": prompt_version, "n": n})

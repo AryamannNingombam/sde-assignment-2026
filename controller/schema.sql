@@ -115,11 +115,22 @@ CREATE TABLE IF NOT EXISTS proposals (
     approval_id TEXT,
     base_version INTEGER,
     created_minute INTEGER,
-    body TEXT
+    body TEXT,
+    route TEXT,
+    priority INTEGER,
+    plan_seq INTEGER,
+    filed_minute INTEGER,
+    apply_by_minute INTEGER,
+    expires_minute INTEGER,
+    supersedes TEXT,
+    applied_version INTEGER,
+    applied_minute INTEGER
 );
+CREATE INDEX IF NOT EXISTS proposals_wf ON proposals (workflow_id, state);
 
 CREATE TABLE IF NOT EXISTS proposal_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER,
     proposal_id TEXT,
     approval_id TEXT,
     workflow_id TEXT,

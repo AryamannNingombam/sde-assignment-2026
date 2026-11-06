@@ -1,24 +1,36 @@
 """Chunk ingestion: one SQLite transaction per chunk, exactly-once effects.
 
-History chunks first, then events chunks, in chunk order. The ``event_id >
-last_event_id`` guard makes replaying a chunk a no-op.
+History chunks first, then events chunks, in global chunk order. The ``event_id >
+last_event_id`` guard makes replaying a chunk a no-op. Inside the chunk transaction the
+lines are parsed and flushed in sub-batches to cap memory.
+
+Limitation: ``GET /config/history`` returns no config bodies, so a config version whose
+``config_changed`` event we never saw (e.g. superseded inside one advance) cannot be
+backfilled; calls under it skip the cohort self-check and are reported in one summarised
+alert plus the ``cohort_check_skipped`` meta counter.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
+from itertools import islice
 
 from . import settings
 from .client import SimClient
 from .cohorts import VOCAB_META_KEY, CohortChecker, FeatureVocab
+from .faults import crash_point
 from .store import Store
 
 log = logging.getLogger(__name__)
 _EPOCH_ORD = date.fromisoformat(settings.EPOCH_DATE).toordinal()
 _MAX_MISMATCH_ALERTS = 5
+_CONFIG_CHANGED_LINE = re.compile(r'^.*"config_changed".*$', re.MULTILINE)
 
 _CALL_SQL = ("INSERT OR IGNORE INTO calls(event_id, workflow_id, ts_minute, day, hour, lid,"
              " attempt_no, config_version, cohort_id, welcome, voice, caller_id, prompt,"
@@ -30,17 +42,16 @@ _CUBE_SQL = ("INSERT INTO cube(workflow_id, day, hour, cell, welcome, voice, cal
              " engaged=engaged+excluded.engaged, flags=flags+excluded.flags,"
              " sum_adherence=sum_adherence+excluded.sum_adherence")
 
-_ts_cache: dict[str, int] = {}
+
+class IngestIntegrityError(RuntimeError):
+    """Rows inserted differ from rows in the batch: abort the chunk transaction."""
 
 
+@lru_cache(maxsize=settings.TS_CACHE_MAX)
 def ts_to_minute(ts: str) -> int:
     """ISO timestamp (IST) to simulated minute since Day 0 00:00 (negative in history)."""
-    got = _ts_cache.get(ts)
-    if got is None:
-        dt = datetime.fromisoformat(ts)
-        got = (dt.date().toordinal() - _EPOCH_ORD) * settings.MINUTES_PER_DAY + dt.hour * 60 + dt.minute
-        _ts_cache[ts] = got
-    return got
+    dt = datetime.fromisoformat(ts)
+    return (dt.date().toordinal() - _EPOCH_ORD) * settings.MINUTES_PER_DAY + dt.hour * 60 + dt.minute
 
 
 @dataclass(frozen=True)
@@ -66,7 +77,7 @@ def mirror_configs(client: SimClient, store: Store, workflow_ids: list[str]) -> 
 
 
 class _ChunkBatch:
-    """Accumulators for one chunk's transaction."""
+    """Accumulators for one sub-batch."""
 
     def __init__(self) -> None:
         self.leads: list[tuple] = []
@@ -86,6 +97,8 @@ class Ingestor:
         self._leads: dict[str, tuple[int, int]] = {}
         self._cohorts: dict[tuple[str, int], list] = {}
         self._history_done = False
+        self._next_lid = 0
+        self._skipped: dict[tuple[str, int], int] = {}
 
     # ------------------------------------------------------------ driver
     def sync(self) -> IngestStats:
@@ -108,33 +121,56 @@ class Ingestor:
             with self.store.transaction():
                 self.store.set_cursor(max(cursor.last_chunk, meta["chunk"]), cursor.last_event_id)
             return IngestStats(chunks=1)
-        events = [e for e in map(json.loads, self.client.iter_chunk_lines(meta["chunk"]))
-                  if e["event_id"] > cursor.last_event_id]
-        fetched = self._fetch_changed_configs(events)
+        text = self.client.get_chunk_text(meta["chunk"])
+        fetched = self._fetch_changed_configs(text)
+        self._skipped = {}
+        n_events = n_calls = n_changes = 0
+        last_id = cursor.last_event_id
         try:
             with self.store.transaction():
-                batch = self._apply(events, fetched)
-                self._flush(batch)
-                last_id = events[-1]["event_id"] if events else cursor.last_event_id
+                self._next_lid = self.store.conn.execute(
+                    "SELECT COALESCE(MAX(lid), 0) FROM leads").fetchone()[0]
+                for cfg in fetched:
+                    self.store.store_config_body(cfg["workflow_id"], cfg["version"],
+                                                 cfg.get("actor"), cfg["config"])
+                stream = io.StringIO(text)
+                while True:
+                    group = list(islice(stream, settings.INGEST_SUBBATCH_LINES))
+                    if not group:
+                        break
+                    events = [e for e in map(json.loads, filter(str.strip, group))
+                              if e["event_id"] > cursor.last_event_id]
+                    del group
+                    if not events:
+                        continue
+                    batch = self._apply(events)
+                    self._flush(batch)
+                    n_events += len(events)
+                    n_calls += len(batch.calls)
+                    n_changes += batch.config_changes
+                    last_id = max(last_id, events[-1]["event_id"])
+                self._report_skipped()
+                crash_point("mid-ingest-txn")
                 self.store.set_cursor(meta["chunk"], last_id)
         except Exception:
             self._leads.clear()
             self._cohorts.clear()
             raise
-        return IngestStats(len(events), len(batch.calls), 1, batch.config_changes,
-                           time.perf_counter() - t0)
+        return IngestStats(n_events, n_calls, 1, n_changes, time.perf_counter() - t0)
 
     # ------------------------------------------------------------ helpers
-    def _fetch_changed_configs(self, events: list[dict]) -> list[dict]:
-        wfs = sorted({e["workflow_id"] for e in events if e["type"] == "config_changed"})
+    def _fetch_changed_configs(self, text: str) -> list[dict]:
+        """Current bodies for workflows with a config_changed event in this chunk.
+
+        Pre-scans only the matching lines, so the chunk is not fully parsed up front.
+        """
+        wfs = sorted({json.loads(m.group(0))["workflow_id"]
+                      for m in _CONFIG_CHANGED_LINE.finditer(text)})
         return [self.client.get_config(w) for w in wfs]
 
-    def _apply(self, events: list[dict], fetched: list[dict]) -> _ChunkBatch:
+    def _apply(self, events: list[dict]) -> _ChunkBatch:
         batch = _ChunkBatch()
-        for cfg in fetched:
-            self.store.store_config_body(cfg["workflow_id"], cfg["version"], cfg.get("actor"),
-                                         cfg["config"])
-        next_lid = self.store.conn.execute("SELECT COALESCE(MAX(lid), 0) FROM leads").fetchone()[0]
+        next_lid = self._next_lid
         for ev in events:
             kind = ev["type"]
             if kind == "call":
@@ -148,6 +184,7 @@ class Ingestor:
                 self._on_approval(ev)
             elif kind == "campaign_created":
                 self._on_campaign(ev)
+        self._next_lid = next_lid
         return batch
 
     def _on_lead(self, ev: dict, lid: int, batch: _ChunkBatch) -> None:
@@ -204,7 +241,7 @@ class Ingestor:
         hit = self._leads.get(lead_id)
         if hit is not None:
             return hit
-        if batch.leads:  # leads of this chunk are not yet flushed to SQL
+        if batch.leads:  # leads of this batch are not yet flushed to SQL
             self._flush_leads(batch)
         return self._lookup_lead(lead_id)
 
@@ -228,6 +265,8 @@ class Ingestor:
     def _self_check(self, ev: dict, cell: int, version: int, batch: _ChunkBatch) -> None:
         cohorts = self._cohorts_for(ev["workflow_id"], version)
         if cohorts is None:
+            key = (ev["workflow_id"], version)
+            self._skipped[key] = self._skipped.get(key, 0) + 1
             return
         want = self._checker.expected(ev["workflow_id"], version, cohorts, cell)
         if want != ev["cohort_id"]:
@@ -245,15 +284,19 @@ class Ingestor:
                                        ev.get("approval_id"))
         self.store.add_decision(minute, "config_observed",
                                 f"v{ev['version']} by {ev.get('actor')} changed {ev.get('changed_dims')}",
-                                ev["workflow_id"], {"event_id": ev["event_id"]})
+                                ev["workflow_id"], {"event_id": ev["event_id"],
+                                                    "proposal_id": ev.get("proposal_id"),
+                                                    "approval_id": ev.get("approval_id")})
         batch.config_changes += 1
 
     def _on_approval(self, ev: dict) -> None:
+        """Idempotent on event_id (UNIQUE); linked to our proposal when we know the approval."""
         self.store.conn.execute(
-            "INSERT INTO proposal_events(proposal_id, approval_id, workflow_id, ts_minute, event,"
-            " payload) VALUES (NULL,?,?,?,?,?)",
-            (ev["approval_id"], ev["workflow_id"], ts_to_minute(ev["ts"]), ev["status"],
-             json.dumps(ev.get("reasons", []))))
+            "INSERT OR IGNORE INTO proposal_events(event_id, proposal_id, approval_id, workflow_id,"
+            " ts_minute, event, payload) VALUES (?, (SELECT proposal_id FROM proposals WHERE"
+            " approval_id=?), ?, ?, ?, ?, ?)",
+            (ev["event_id"], ev["approval_id"], ev["approval_id"], ev["workflow_id"],
+             ts_to_minute(ev["ts"]), ev["status"], json.dumps(ev.get("reasons", []))))
 
     def _on_campaign(self, ev: dict) -> None:
         self.store.conn.execute(
@@ -262,11 +305,28 @@ class Ingestor:
             (ev["campaign_id"], ev["workflow_id"], ts_to_minute(ev["ts"]), ev["leads"],
              ev["config_version_at_creation"]))
 
+    def _report_skipped(self) -> None:
+        """One summarised alert (and a running counter) for self-checks we could not run."""
+        if not self._skipped:
+            return
+        total = sum(self._skipped.values())
+        done = int(self.store.get_meta("cohort_check_skipped") or 0)
+        self.store.set_meta("cohort_check_skipped", str(done + total))
+        detail = ", ".join(f"{w} v{v}: {n}" for (w, v), n in sorted(self._skipped.items()))
+        self.store.add_alert(None, "warn", "cohort_check_skipped",
+                             f"{total} calls skipped the cohort self-check (config body unknown; "
+                             f"/config/history has no bodies): {detail}")
+
     def _flush(self, batch: _ChunkBatch) -> None:
         conn = self.store.conn
         if batch.leads:
             self._flush_leads(batch)
+        before = conn.total_changes
         conn.executemany(_CALL_SQL, batch.calls)
+        inserted = conn.total_changes - before
+        if inserted != len(batch.calls):  # cube increments must match rows really inserted
+            raise IngestIntegrityError(
+                f"inserted {inserted} call rows for a batch of {len(batch.calls)}")
         conn.executemany(_CUBE_SQL, [k + tuple(v) for k, v in batch.cube.items()])
         if batch.mismatches:
             summary = list(batch.mismatches)
