@@ -166,3 +166,40 @@ SCHEDULE_VERIFY_DONE_DIALS = 4000  # ... and after which a passing check is fina
 SCHEDULE_VERIFY_P = 0.05  # one-sided p for "pickup fell by at least the guardrail"
 SCHEDULE_MIN_HISTORY_DAYS_COLD = 1  # cold start: build cohorts from this many full days of live data
 SIBLING_MIN_LIVE_FRACTION = 0.5  # the live prompt's failure lower bound must be >= half the workflow's tolerance (1 - min pass)
+
+
+# --- Phase 6: welcome x voice experiments and decay (C6/C7; derivations in docs/THRESHOLDS.md) ----------------
+EXP_ENTRY_SHARE = 0.075  # CONTEXT C6: each challenger enters at 7.5% ...
+EXP_MAX_CHALLENGER_TOTAL = 0.225  # ... and a dim's challengers total at most 22.5% at entry
+EXP_RAMP_SHARE = 0.20  # a challenger whose point estimate is >= control ramps to 20%
+EXP_MIN_CONTROL_SHARE = 0.40  # control never drops below 40% during the experiment
+EXP_RAMP_MIN_DAYS = 1.0  # ramp/drop decisions need >= 1 day of exposure ...
+EXP_RAMP_MIN_CONNECTS = 100  # ... and >= 100 connects on the arm
+EXP_DROP_Z = -1.0  # a challenger at z <= -1 is dropped in the next daily bundle
+EXP_HARM_Z = -3.0  # harm-stop (every 4 h): z <= -3 with >= EXP_HARM_MIN_CONNECTS connects
+EXP_HARM_MIN_CONNECTS = 150
+EXP_HARM_CHECK_MINUTES = 240
+EXP_ALPHA = 0.05  # overall one-sided familywise level of the winner decision (all scopes together)
+EXP_ALPHA_WORKFLOW = 0.04  # share of EXP_ALPHA for the workflow-level test; each analysis group gets 0.005
+EXP_ALPHA_GROUP = 0.005
+EXP_LOOK_FRACTIONS = (0.25, 0.5, 0.75, 1.0)  # <= 4 planned looks at these information fractions
+EXP_DESIGN_MDE = 0.10  # relative lift the experiment is sized for (information fraction denominator)
+EXP_DESIGN_POWER = 0.80
+EXP_DESIGN_ALPHA = 0.05
+EXP_MIN_POINT_LIFT = 0.03  # promote only if the point lift is at least 3%
+EXP_RECENT_MINUTES = 1440  # the recent window that must agree
+EXP_RECENT_Z = 1.0  # recent-window lift minus this many standard errors must be > 0
+EXP_RECENT_MIN_CONNECTS = 50
+EXP_PICKUP_Z = 1.645  # non-inferiority upper bound on the pickup drop
+EXP_MIN_ARM_CONNECTS_FOR_TEST = 100
+EXP_HOLDOUT = 0.10  # share left on the old control after a promotion
+EXP_GROUP_MIN_SHARE = 0.35  # each pre-registered analysis group carries at least this share of traffic
+EXP_SUPERVISOR_COOLDOWN_MINUTES = 1440  # after a supervisor edit of a dim, wait before proposing again
+EXP_CUSUM_BLOCK = 150  # connects per CUSUM block
+EXP_CUSUM_REF_BLOCKS = 3  # blocks after promotion that define the winner's own reference level
+EXP_CUSUM_K = 0.5  # allowance, in standard errors
+EXP_CUSUM_H = 4.0  # alarm threshold
+EXP_CUSUM_SHRINK_N = 20  # pseudo-connects pulling an (hour, cell) reference rate toward the pooled rate
+EXP_ROLLBACK_Z = -1.96  # winner significantly worse than the holdout
+EXP_ROLLBACK_HOLDOUT_MIN = 60  # holdout connects needed for the significance route
+EXP_HOLDOUT_WINDOW_MINUTES = 1440

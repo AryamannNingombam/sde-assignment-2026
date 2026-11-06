@@ -89,9 +89,13 @@ def obf_spend(t: float, alpha: float) -> float:
     return 2.0 * (1.0 - _N.cdf(_N.inv_cdf(1.0 - alpha / 2.0) / math.sqrt(t)))
 
 
+_SF_X = np.linspace(-14.0, 14.0, 56001)
+_SF_Y = np.array([0.5 * math.erfc(x / math.sqrt(2.0)) for x in _SF_X])
+
+
 def _norm_sf_vec(x: np.ndarray) -> np.ndarray:
-    from math import erfc
-    return 0.5 * np.vectorize(erfc)(x / math.sqrt(2.0))
+    """Standard normal upper tail by table interpolation (grid step 5e-4: error < 1e-8)."""
+    return np.interp(x, _SF_X, _SF_Y)
 
 
 @lru_cache(maxsize=4096)
@@ -131,9 +135,9 @@ def obf_boundary(ts: Sequence[float], alpha: float) -> float:
     """Boundary of the LAST look in ``ts`` given the earlier looks' information fractions."""
     clean: list[float] = []
     for t in ts:
-        t = min(1.0, max(float(t), 1e-4))
-        if not clean or t > clean[-1] + 1e-4:
-            clean.append(round(t, 4))
+        t = round(min(1.0, max(float(t), 0.01)), 2)  # 0.01 resolution keeps the boundary cache small
+        if not clean or t > clean[-1] + 1e-9:
+            clean.append(t)
     if not clean:
         return math.inf
     if clean[-1] >= 1.0 and len(clean) > 1 and clean[-2] >= 1.0:
