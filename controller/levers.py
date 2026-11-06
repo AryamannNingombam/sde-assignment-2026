@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from . import baselines, settings
 from .desired import DEFAULT_REGISTRY, PlanContext, Registry
-from .detectors import did, halluc
+from .detectors import did, halluc, prompt_safety
 
 _REGISTERED: set[int] = set()
 
@@ -20,6 +20,7 @@ def register_defaults(registry: Registry = DEFAULT_REGISTRY) -> None:
     _REGISTERED.add(id(registry))
     registry.register_detector(baselines_detector)
     halluc.register(registry)
+    prompt_safety.register(registry)
     did.register(registry)
 
 

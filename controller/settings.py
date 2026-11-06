@@ -143,3 +143,9 @@ DID_SOLO_REF_HOURS = 48  # reference = the two days before the window (same hour
 DID_SOLO_SHRINK_N = 30  # (hour, cell) reference rates are shrunk toward the hour's pooled rate with this many dials
 DID_SOLO_P_FACTOR = 0.1  # solo test level = DID_FLAG_P x this (no peers to absorb a common shock: stricter)
 DID_SOLO_DAYS_BACK = 4  # cube days loaded for the test (window + reference)
+
+# --- A2 sibling prompt safety check (docs/THRESHOLDS.md) ----------------------------------
+SIBLING_MAX = 3  # catalogue siblings validated per workflow, in catalogue order (never chosen by summary text)
+SIBLING_N = 200  # modest validation size: 2 credits each
+SIBLING_TOPUP_N = 300  # one top-up (3 credits) for a sibling that looks clearly better but is not yet separated
+SIBLING_BOUND_Z = 1.645  # one-sided 95% Wilson bounds: sibling upper bound must lie below the live prompt's lower bound
