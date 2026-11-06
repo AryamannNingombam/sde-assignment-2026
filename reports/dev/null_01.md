@@ -4,45 +4,51 @@
 
 | workflow | conclusion rate | Δ | pickup | Δ | engagement | Δ | engagement gap captured | hallucinated calls (base) |
 |---|---|---|---|---|---|---|---|---|
-| ks_cancel | 0.377 | +6.4% | 0.260 | +6.6% | 0.503 | -0.7% | 0% | 67 (61) |
-| nw_kyc | 0.449 | +21.3% | 0.295 | +23.9% | 0.585 | -3.6% | 0% | 35 (19) |
-| nw_renewal | 0.459 | +8.2% | 0.281 | +7.2% | 0.553 | +0.4% | 0% | 51 (50) |
-| ALL | 0.419 | +10.1% | 0.274 | +10.0% | 0.538 | -0.6% | 0% | 153 (130) |
+| ks_cancel | 0.355 | +0.3% | 0.248 | +1.7% | 0.499 | -1.5% | 0% | 59 (61) |
+| nw_kyc | 0.468 | +26.4% | 0.298 | +24.9% | 0.601 | -1.0% | 0% | 29 (19) |
+| nw_renewal | 0.450 | +6.2% | 0.282 | +7.6% | 0.546 | -0.8% | 0% | 46 (50) |
+| ALL | 0.411 | +7.9% | 0.269 | +8.1% | 0.538 | -0.6% | 0% | 134 (130) |
 
 ## Changes applied by the controller
 
-14 applied — neutral: 10, beneficial: 4
+20 applied — neutral: 15, beneficial: 4, harmful: 1
 
 - ks_cancel v2 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.004 → **neutral**
 - nw_renewal v2 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.004 → **neutral**
-- ks_cancel v3 (controller_approved) dims=['cohorts', 'schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- ks_cancel v3 (controller_approved) dims=['cohorts', 'welcome_message', 'voice', 'schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
 - nw_kyc v2 (controller_approved) dims=['cohorts', 'caller_id', 'schedule'] engageΔ=+0.000 didΔ=+0.008 → **neutral**
-- nw_renewal v3 (controller_approved) dims=['cohorts', 'schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
-- nw_renewal v4 (controller_auto) dims=['schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- nw_renewal v3 (controller_approved) dims=['cohorts', 'welcome_message', 'voice', 'schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
 - nw_kyc v3 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.375 → **beneficial**
 - ks_cancel v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.033 → **beneficial**
-- ks_cancel v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.020 → **beneficial**
-- nw_renewal v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.030 → **beneficial**
+- ks_cancel v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.021 → **beneficial**
+- nw_renewal v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.048 → **beneficial**
+- nw_renewal v5 (controller_approved) dims=['welcome_message', 'voice'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- ks_cancel v6 (controller_approved) dims=['welcome_message', 'voice'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- ks_cancel v7 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=-0.022 → **harmful**
+- ks_cancel v8 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=-0.017 → **neutral**
 - nw_kyc v4 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=-0.000 → **neutral**
 - nw_kyc v5 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.010 → **neutral**
-- nw_renewal v6 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.009 → **neutral**
+- ks_cancel v9 (controller_approved) dims=['welcome_message', 'voice'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- ks_cancel v10 (controller_approved) dims=['voice'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- nw_renewal v6 (controller_approved) dims=['welcome_message', 'voice'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
+- nw_renewal v7 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.009 → **neutral**
 - nw_kyc v6 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
 
 ## Governance
 
 ```
 {
-  "approval_requests": 9,
+  "approval_requests": 15,
   "decisions": {
-    "approved": 8,
-    "rejected": 1,
+    "approved": 13,
+    "rejected": 2,
     "expired": 0
   },
   "rejection_reasons": {
-    "approver declined (judgement call)": 1
+    "approver declined (judgement call)": 2
   },
-  "applied_via_approval": 7,
-  "auto_applied": 7,
+  "applied_via_approval": 12,
+  "auto_applied": 8,
   "auto_apply_rejected": 0,
   "apply_conflicts": 0,
   "lapsed": 0,
