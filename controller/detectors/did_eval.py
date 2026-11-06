@@ -23,8 +23,11 @@ class StepResult:
     test: RatioDrop
     share_window: float
     share_ref: float
+    solo: bool = False  # own-history test (no peers): stricter level, see did_solo
 
     def flagged(self, level: float = settings.DID_FLAG_P) -> bool:
+        if self.solo:
+            level *= settings.DID_SOLO_P_FACTOR
         return self.test.drop >= settings.DID_FLAG_MIN_DROP and self.test.p < level
 
     def as_dict(self) -> dict:
@@ -32,7 +35,7 @@ class StepResult:
                 "n_peers": self.n_peers_window, "n_ref": self.n_ref, "drop": round(self.test.drop, 4),
                 "z": round(self.test.z, 3), "p": self.test.p, "q_window": round(self.test.q_window, 4),
                 "q_ref": round(self.test.q_ref, 4), "share_window": round(self.share_window, 4),
-                "share_ref": round(self.share_ref, 4)}
+                "share_ref": round(self.share_ref, 4), "solo": self.solo}
 
 
 @dataclass(frozen=True)

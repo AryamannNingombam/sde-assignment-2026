@@ -137,3 +137,9 @@ SUGGEST_FIXES_COST = 3.0
 # --- C3 baselines --------------------------------------------------------------------------
 BASELINE_MIN_DAYS = 3  # history days needed to call a baseline complete
 BASELINE_REFRESH_MINUTES = 1440  # incomplete (cold-start) baselines are recomputed daily
+
+# --- A1 solo-DID own-history step test (docs/THRESHOLDS.md) -------------------------------
+DID_SOLO_REF_HOURS = 48  # reference = the two days before the window (same hours-of-day appear in it)
+DID_SOLO_SHRINK_N = 30  # (hour, cell) reference rates are shrunk toward the hour's pooled rate with this many dials
+DID_SOLO_P_FACTOR = 0.1  # solo test level = DID_FLAG_P x this (no peers to absorb a common shock: stricter)
+DID_SOLO_DAYS_BACK = 4  # cube days loaded for the test (window + reference)

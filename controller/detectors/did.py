@@ -16,7 +16,7 @@ from .. import settings
 from ..configlib import dist
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from ..incidents import close_incident, open_incident, open_incidents
-from . import did_data, did_eval, did_plan
+from . import did_data, did_eval, did_plan, did_solo
 from .common import latest_config, load_state, save_state
 from .did_plan import BAD, FLAGGED, REPROBE, SUSPECT, TESTED, UNTESTED, WEAK
 from .fatigue_curve import FatigueCurve, fit_curve
@@ -89,8 +89,19 @@ def _evaluate(ctx: PlanContext, wid: str) -> tuple[did_eval.Evaluation, dict] | 
     since = {d: v["minute"] // 60 for d, v in st["reprobe"].items()}
     ev = did_eval.evaluate(series, curve, ctx.now // 60, options, list(st["flagged"]) + list(st["reprobe"]),
                            list(st["flagged"]) + list(st["weak"]), since)
+    _add_solo_steps(ctx, wid, ev, series, curve, options, st)
     MEMO[key] = (ctx.now, ev, st)
     return ev, st
+
+
+def _add_solo_steps(ctx, wid: str, ev, series, curve, options, st: dict) -> None:
+    """A1: a DID with no peer step test (no peers with enough dials) is tested against its own history."""
+    cur = ctx.now // 60
+    tested = {r.did for r in ev.steps}
+    recent, _ = series.window(range(cur - 24 + 1, cur + 1))
+    solo = [d for d in options if recent.get(d, 0) >= settings.DID_FLAG_MIN_DIALS
+            and d not in tested and d not in st["flagged"] and d not in st["weak"]]
+    ev.steps = list(ev.steps) + did_solo.peerless_steps(ctx.store, wid, series, curve, cur, solo)
 
 
 def _flag(ctx: PlanContext, wid: str, ev, st: dict, step: did_eval.StepResult) -> None:
@@ -99,8 +110,9 @@ def _flag(ctx: PlanContext, wid: str, ev, st: dict, step: did_eval.StepResult) -
                                "q_est": round(1.0 - step.test.drop, 4), "n": step.n_window}
     open_incident(ctx.store, wid, "did_flagged", ctx.now,
                   {"did": step.did, "step": step.as_dict(), "q_est": round(q_est, 4)})
-    msg = (f"FLAGGED {step.did}: pickup ratio vs peers fell {step.test.drop:.0%} (p={step.test.p:.1e}, "
-           f"{step.n_window} dials in {step.window_hours}h vs {step.n_ref} in prior day); incident mode")
+    ref = "its own history (hour/cell/fatigue adjusted)" if step.solo else "peers"
+    msg = (f"FLAGGED {step.did}: pickup ratio vs {ref} fell {step.test.drop:.0%} (p={step.test.p:.1e}, "
+           f"{step.n_window} dials in {step.window_hours}h vs {step.n_ref} in the reference); incident mode")
     ctx.store.add_decision(ctx.now, "did_flagged", msg, wid, {"step": step.as_dict(),
                                                               "curve": ev.curve.params()})
     ctx.store.add_alert(ctx.now, "warn", "did_flagged", msg, wid)
