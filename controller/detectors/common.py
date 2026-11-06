@@ -29,3 +29,13 @@ def save_state(store: Store, detector: str, key: str, value: Any) -> None:
 
 def credits_remaining(client) -> float:
     return float(client.credits_remaining())
+
+
+def note_once(store: Store, key: str, now: int) -> bool:
+    """True the first time per sim day for ``key`` (same table/format as ``Governance.note_once``)."""
+    day = str(now // 1440)
+    row = store.conn.execute("SELECT value FROM detector_state WHERE detector='note_once' AND key=?", (key,)).fetchone()
+    if row is not None and row[0] == day:
+        return False
+    store.conn.execute("INSERT OR REPLACE INTO detector_state(detector, key, value) VALUES ('note_once', ?, ?)", (key, day))
+    return True

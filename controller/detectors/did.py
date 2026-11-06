@@ -17,7 +17,8 @@ from ..configlib import dist
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from ..incidents import close_incident, open_incident, open_incidents
 from . import did_data, did_eval, did_plan, did_solo
-from .common import latest_config, load_state, save_state
+from .common import latest_config, load_state, note_once, save_state
+from .did_owner import clock, minimal_evacuation, supervisor_edit
 from .did_plan import BAD, FLAGGED, REPROBE, SUSPECT, TESTED, UNTESTED, WEAK
 from .fatigue_curve import FatigueCurve, fit_curve
 
@@ -264,8 +265,15 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
     limit = _auto_limit(wf)
     patch: dict = {}
     notes: list[str] = []
+    owned: list[tuple[str, dict, dict, dict]] = []  # (key, supervisor edit, current, evacuation step)
     for key in _keys(cfg[1]):
         cur = dist(cfg[1], key, "caller_id")
+        sup = supervisor_edit(ctx.store, wid, key)
+        if sup:  # B1: a supervisor's allocation is owned; the only exception is evacuating a FLAGGED DID (approval)
+            step = _hold_owned(ctx, wid, key, cur, sup, status, st)
+            if step:
+                owned.append((key, sup, dict(cur), step))
+            continue
         target = did_plan.target_allocation(cur, status, h_bar(ev, cur))
         step = did_plan.plan_step(cur, target, limit, status)
         if not _rebalance_not_harmful(ev, st, cfg[1], cur, step):
@@ -276,9 +284,41 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         patch.setdefault("allocations", {}).setdefault(key, {})["caller_id"] = step
         notes.append(f"{key}: " + ", ".join(f"{d} {cur.get(d, 0):.1%}->{step.get(d, 0):.1%}"
                                             for d in sorted(set(cur) | set(step))))
-    if not patch:
-        return []
-    return [_change(wid, patch, status, st, ev, notes, limit, cfg[1])]
+    out = [_change(wid, patch, status, st, ev, notes, limit, cfg[1])] if patch else []
+    return out + ([_owned_change(wid, owned, st)] if owned else [])
+
+
+def _hold_owned(ctx: PlanContext, wid: str, key: str, cur: Mapping, sup: Mapping, status: Mapping, st: Mapping) -> dict | None:
+    """Log the hold; return the minimal flagged-DID evacuation step for a supervisor-owned key, if one is needed."""
+    bad = {d for d in st["flagged"] if cur.get(d, 0.0) > 1e-9}
+    step = minimal_evacuation(cur, bad, [d for d, s in status.items() if s == TESTED]) if bad else None
+    if step is not None and (set(step) & bad or not step):
+        step = None  # nowhere safe to move the traffic: leave it for the supervisor
+    if note_once(ctx.store, f"did_owned:{wid}:{key}:{sorted(bad)}", ctx.now):
+        what = (f"; only evacuating FLAGGED {', '.join(sorted(bad))} (via approval)" if step else "; no probe, spread or rebalance")
+        ctx.store.add_decision(ctx.now, "did_supervisor_hold",
+                               f"caller_id allocation of '{key}' was set by a supervisor at config v{sup['version']} "
+                               f"({clock(sup['minute'])}); treating it as owned{what}", wid,
+                               {"key": key, "supervisor_edit": dict(sup), "flagged": sorted(bad)})
+    return step
+
+
+def _owned_change(wid: str, owned: list, st: Mapping) -> DesiredChange:
+    patch: dict = {}
+    parts, edits = [], {}
+    for key, sup, cur, step in owned:
+        patch.setdefault("allocations", {}).setdefault(key, {})["caller_id"] = step
+        bad = sorted(d for d in st["flagged"] if cur.get(d, 0.0) > 1e-9)
+        q = min(st["flagged"][d]["q_est"] for d in bad)
+        edits[key] = dict(sup)
+        parts.append(f"'{key}': move {', '.join(bad)} (pickup ratio vs peers x{q:.2f}, FLAGGED) onto "
+                     + ", ".join(f"{d} {cur.get(d, 0):.1%}->{step.get(d, 0):.1%}" for d in sorted(step))
+                     + f"; this allocation was set by a supervisor at config v{sup['version']} ({clock(sup['minute'])}),"
+                     " so only the flagged number is removed and the rest of their split is kept proportionally")
+    summary = "Safety evacuation of a flagged caller ID from a supervisor-set allocation (needs approval): " + " | ".join(parts)
+    first = next(iter(edits.values()))
+    evidence = {"rationale": summary, "flag_evacuation": True, "supervisor_edit": first, "supervisor_edits": edits}
+    return DesiredChange(wid, "did_evacuation", Priority.INCIDENT, patch, ROUTE_APPROVAL, evidence, summary)
 
 
 def _rebalance_not_harmful(ev, st, cfg: Mapping, cur: Mapping, step: Mapping) -> bool:
