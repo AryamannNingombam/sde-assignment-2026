@@ -29,6 +29,8 @@ RETRY_MAX_DELAY_S = 8.0
 # --- Ingest ------------------------------------------------------------------
 LEAD_CACHE_MAX = 600_000
 SQLITE_BUSY_TIMEOUT_MS = 30_000
+WAL_AUTOCHECKPOINT_PAGES = 20_000  # rarer checkpoints: each one fsyncs the whole DB
+SQLITE_CACHE_KB = 200_000
 
 # --- Loop --------------------------------------------------------------------
 STARTUP_WAIT_S = 300.0

@@ -37,6 +37,8 @@ class Store:
                                     timeout=settings.SQLITE_BUSY_TIMEOUT_MS / 1000)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute(f"PRAGMA wal_autocheckpoint={settings.WAL_AUTOCHECKPOINT_PAGES}")
+        self.conn.execute(f"PRAGMA cache_size=-{settings.SQLITE_CACHE_KB}")
         self.conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         if self.get_meta("schema_version") is None:
             self.set_meta("schema_version", SCHEMA_VERSION)
