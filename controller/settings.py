@@ -8,7 +8,7 @@ from __future__ import annotations
 # --- Feature flags: every lever stays OFF until its phase is green -----------
 ENABLE_DID = True  # Phase 3 green
 ENABLE_HALLUC = True  # Phase 3 green
-ENABLE_SCHEDULE = False
+ENABLE_SCHEDULE = True  # Phase 5 green
 ENABLE_EXPERIMENTS = False
 ENABLE_PERSON_ANALYSIS = False
 
@@ -153,10 +153,13 @@ SIBLING_BOUND_Z = 1.645  # one-sided 95% Wilson bounds: sibling upper bound must
 # --- Phase 5: shared cohorts (C2) and per-cohort call time (C4a) (docs/THRESHOLDS.md) ----
 COHORT_MIN_DIALS_PER_HOUR = 100  # n_min per cohort = this x in-window hours: se_rel(100) = 15% per (cohort, hour) rate
 COHORT_MAX = 20  # the sim's limit
+COHORT_MIN_Z = 3.72  # a partition must beat the pooled hour profile at one-sided p<1e-4 (= 1e-3 / 10 candidate partitions)
+COHORT_PAIR_MARGIN_Z = 2.0  # a feature pair must beat the best single feature by this much z (parsimony)
 COHORT_FEATURE_SUBSETS = 2  # partitions use one feature or a pair of features
 SCHEDULE_HISTORY_DAYS = 14  # days of calls used for the hour multipliers
 SCHEDULE_WEIGHT_CLIP = (0.3, 3.0)  # CONTEXT C4a
-SCHEDULE_MIN_LIFT = 0.005  # a bundle / refresh is proposed only if the estimated relative pickup lift is >= 0.5%
+SCHEDULE_MIN_LIFT = 0.005  # a REFRESH is proposed only if the estimated relative pickup lift is >= 0.5%
+SCHEDULE_BUNDLE_MIN_LIFT = 0.0005  # the Day-0 bundle: the significant partition is the shared cohort object; tables must just not be a loss
 SCHEDULE_ENG_SHRINK_N = 20  # connects of pseudo-evidence pulling a cohort-hour engagement toward the cohort mean
 SCHEDULE_VERIFY_MIN_DIALS = 1500  # post-apply dials before the before/after pickup check is evaluated
 SCHEDULE_VERIFY_DONE_DIALS = 4000  # ... and after which a passing check is final

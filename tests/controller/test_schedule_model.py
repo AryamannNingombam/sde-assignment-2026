@@ -69,3 +69,19 @@ def test_engagement_drop_is_reported_absolute():
     m = sm.fit(rows, assign, HOURS)
     out = sm.outcome(m, sm.tables(m, ["A", "B"]), {})
     assert "engagement_drop" in out
+
+
+def test_verify_change_flags_a_pickup_drop_standardised_to_the_before_mix():
+    before = {(h, c): (500, 150, 75) for h in HOURS for c in "AB"}
+    after_ok = {k: (500, 150, 75) for k in before}
+    after_bad = {k: (500, 100, 50) for k in before}
+    ok, bad = sm.verify_change(before, after_ok), sm.verify_change(before, after_bad)
+    assert abs(ok["pickup"]["drop"]) < 1e-9 and ok["pickup"]["p_drop"] > 0.4
+    assert bad["pickup"]["drop"] > 0.09 and bad["pickup"]["p_drop"] < 1e-6
+
+
+def test_verify_change_ignores_a_pure_retiming():
+    before = {(h, "A"): (500 if h < 15 else 100, 150 if h < 15 else 30, 0) for h in HOURS}
+    after = {(h, "A"): (100 if h < 15 else 500, 30 if h < 15 else 150, 0) for h in HOURS}
+    res = sm.verify_change(before, after)
+    assert abs(res["pickup"]["drop"]) < 1e-9  # same hour-cell rates: the mix shift is not a drop

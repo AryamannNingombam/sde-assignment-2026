@@ -132,6 +132,8 @@ def build_draft(store, vocab: FeatureVocab, wf: Mapping, version: int, current: 
             evidence["validation_run_id"] = change.evidence["validation_run_id"]
     tv = tv_by_cohort(current, cfg)
     dry = dryrun.build_dry_run(store, vocab, wf, current, cfg, now, list(dims), evidence)
+    for change in changes:  # producers may attach their own estimates (e.g. the call-time guardrail dry run)
+        dry.update(change.evidence.get("dry_run_extra", {}))
     override = next((c.evidence["impact_override"] for c in changes if "impact_override" in c.evidence), None)
     return ProposalDraft(
         workflow_id=wf["workflow_id"], kind=min(changes, key=lambda c: (c.priority, c.kind)).kind,

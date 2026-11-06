@@ -41,7 +41,7 @@ def test_partition_is_non_overlapping():
 
 
 def test_no_partition_when_hour_profile_is_shared():
-    vocab, rows = vocab_and_rows(lambda lang, tier, h: 0.1 + 0.02 * (h - 10) + (0.05 if lang == "hi" else 0))
+    vocab, rows = vocab_and_rows(lambda lang, tier, h: (0.1 + 0.02 * (h - 10)) * (1.5 if lang == "hi" else 1.0))
     assert co.select_partition(rows, vocab, HOURS) is None  # level differences alone are not hour variation
 
 

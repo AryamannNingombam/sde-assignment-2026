@@ -99,7 +99,7 @@ from . import settings
 class Partition:
     features: tuple[str, ...]
     cohorts: tuple[dict, ...]  # [{"id", "where"}], pairwise disjoint (a partition: first-match order cannot matter)
-    score: float  # BIC-adjusted likelihood gain of the group x hour interaction
+    score: float  # Wilson-Hilferty z of the group x hour interaction likelihood-ratio statistic
     gain: float  # raw likelihood-ratio statistic
     df: int
     n_min: int
@@ -108,6 +108,14 @@ class Partition:
     def as_dict(self) -> dict:
         return {"features": list(self.features), "cohorts": list(self.cohorts), "score": round(self.score, 2),
                 "gain": round(self.gain, 2), "df": self.df, "n_min": self.n_min, "candidates": self.candidates}
+
+
+def interaction_z(stat: float, df: int) -> float:
+    """Normal score of a chi-square statistic (Wilson-Hilferty): comparable across candidates with different df."""
+    if df <= 0:
+        return 0.0
+    c = 2.0 / (9.0 * df)
+    return ((stat / df) ** (1.0 / 3.0) - (1.0 - c)) / math.sqrt(c)
 
 
 def cohort_id(features: tuple[str, ...], values: tuple[str, ...]) -> str:
@@ -178,13 +186,13 @@ def _group(rows, vocab: FeatureVocab, feats: tuple[str, ...], min_dials: int, ca
 
 def select_partition(rows, vocab: FeatureVocab, hours: list[int]) -> Partition | None:
     """Pick the feature (or pair) whose groups best explain hour-of-day pickup variation (largest BIC-adjusted
-    likelihood gain over the pooled hour profile); groups with volume < n_min fall into ``default``.
+    likelihood-ratio statistic of the group x hour interaction, as a df-comparable z, above the multiple-testing
+    bar ``COHORT_MIN_Z``); groups with volume < n_min fall into ``default``.
 
     ``rows`` are ``(hour, cell, dials, connects)`` over the learning window. Data-driven only; None when no
     partition beats the pooled profile.
     """
     rows = [r for r in rows if r[0] in set(hours)]
-    total = sum(r[2] for r in rows)
     floor = n_min(len(hours))
     best: Partition | None = None
     scores: dict[str, float] = {}
@@ -197,9 +205,11 @@ def select_partition(rows, vocab: FeatureVocab, hours: list[int]) -> Partition |
             if rest:
                 groups[("~rest",)] = rest
             stat, df = interaction_gain(groups, hours)
-            score = stat - df * math.log(max(total, 2))
-            scores["+".join(feats)] = round(score, 1)
-            if score > 0 and (best is None or score > best.score):
+            score = interaction_z(stat, df)
+            scores["+".join(feats)] = round(score, 2)
+            bar = settings.COHORT_MIN_Z + (settings.COHORT_PAIR_MARGIN_Z if k == 2 and best is not None
+                                           and len(best.features) == 1 else 0.0)
+            if score >= settings.COHORT_MIN_Z and (best is None or score > best.score + (bar - settings.COHORT_MIN_Z)):
                 cohorts = tuple({"id": cohort_id(feats, key), "where": {f: [v] for f, v in zip(feats, key)}}
                                 for key in kept)
                 best = Partition(feats, cohorts, score, stat, df, floor)

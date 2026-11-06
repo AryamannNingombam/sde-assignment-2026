@@ -157,3 +157,45 @@ def outcome(model: Model, new: Mapping[str, Mapping], current: Mapping[str, Mapp
             "rel_lift": round(new_["pickup"] / old["pickup"] - 1, 5) if old["pickup"] else 0.0,
             "engagement_old": round(old["engagement"], 5), "engagement_new": round(new_["engagement"], 5),
             "engagement_drop": round(old["engagement"] - new_["engagement"], 5)}
+
+
+# --------------------------------------------------------------------------- post-apply verification
+def _z_p(diff: float, se: float) -> tuple[float, float]:
+    from .stats import norm_sf
+    z = diff / se if se > 0 else 0.0
+    return z, norm_sf(z)
+
+
+def verify_change(before: Mapping, after: Mapping) -> dict:
+    """Hour-mix-adjusted before/after comparison of pickup and engagement.
+
+    ``before`` / ``after`` map ``(hour_of_day, cohort)`` to ``(dials, connects, engaged)``. Both periods are
+    standardised to the BEFORE dial mix over the cells they share, so a pure re-timing is not a gain and a
+    change in hour mix cannot masquerade as a drop; what is left is whether pickup (or engagement) within the
+    same hour x cohort cells moved. There is no concurrent control: day-to-day lead mix, DID changes and fatigue
+    confound it, and the caller treats it as a guardrail, not as proof of lift.
+    """
+    keys = [k for k in before if k in after and before[k][0] > 0 and after[k][0] > 0]
+    nb_tot = sum(before[k][0] for k in keys)
+    if not keys or nb_tot <= 0:
+        return {"usable": False}
+    out: dict = {"usable": True, "cells": len(keys), "n_after": sum(v[0] for v in after.values())}
+    for name, num, den in (("pickup", 1, 0), ("engagement", 2, 1)):
+        pb = pa = vb = va = 0.0
+        for k in keys:
+            w = (before[k][0] if den == 0 else before[k][1]) / (nb_tot if den == 0 else max(sum(before[q][1] for q in keys), 1))
+            rb, ra = before[k][num] / max(before[k][den], 1), after[k][num] / max(after[k][den], 1)
+            pb += w * rb
+            pa += w * ra
+            vb += w * w * rb * (1 - rb) / max(before[k][den], 1)
+            va += w * w * ra * (1 - ra) / max(after[k][den], 1)
+        se = (vb + va) ** 0.5
+        z, p = _z_p(pb - pa, se)
+        out[name] = {"before": round(pb, 5), "after_std": round(pa, 5), "drop": round(pb - pa, 5),
+                     "se": round(se, 5), "z": round(z, 3), "p_drop": p}
+    raw = lambda d, i, j: sum(v[i] for v in d.values()) / max(sum(v[j] for v in d.values()), 1)  # noqa: E731
+    out["raw_pickup_before"] = round(raw(before, 1, 0), 5)
+    out["raw_pickup_after"] = round(raw(after, 1, 0), 5)
+    out["raw_engagement_before"] = round(raw(before, 2, 1), 5)
+    out["raw_engagement_after"] = round(raw(after, 2, 1), 5)
+    return out
