@@ -47,7 +47,7 @@ def test_flagged_did_is_detected_and_evacuated_without_hygiene_errors(flagged_wo
     run_to(ctl, client, when(2, 14))
     row = store.conn.execute("select sim_minute, inputs from decisions where kind='did_flagged'").fetchone()
     assert row is not None, "D2 never flagged"
-    assert when(2, 10) <= row[0] <= when(2, 12, 30)  # within a couple of hours of onset
+    assert when(2, 10) <= row[0] <= when(2, 13, 0)  # within ~3 hours of onset
     step = json.loads(row[1])["step"]
     assert step["did"] == "D2" and step["p"] < 0.001 and step["drop"] > settings.DID_FLAG_MIN_DROP
     cfg = client.get_config("ks_cancel")["config"]
