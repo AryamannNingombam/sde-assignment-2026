@@ -47,12 +47,12 @@ class FakeClient:
     state = None
 
 
-def ctx_for(tmp_path, client, prompts=("P1", "P2", "P3", "P4", "P5"), min_pass=0.97, n_wf=1):
+def ctx_for(tmp_path, client, prompts=("P1", "P2", "P3", "P4", "P5"), min_pass=0.97, n_wf=1, live_fails=8):
     store = Store(tmp_path / "s.db")
     wf = {"workflow_id": "w", "options": {"prompt_version": list(prompts)},
           "governance": {"min_validation_pass_rate": min_pass}}
     store_validation(store, {"validation_run_id": "val_live", "workflow_id": "w", "prompt_version": "P4", "n": 300,
-                             "pass_rate": round(1 - 8 / 300, 4)}, 3.0, 0)
+                             "pass_rate": round(1 - live_fails / 300, 4)}, 3.0, 0)
     workflows = {f"w{i}": dict(wf, workflow_id=f"w{i}") for i in range(n_wf)}
     workflows["w"] = wf
     return PlanContext(store, client, workflows, 0)
@@ -103,8 +103,8 @@ def test_immaterial_live_failure_rate_is_not_switched_even_if_bounds_separate(tm
 
 
 def test_live_prompt_gets_one_second_look_before_an_immaterial_switch(tmp_path):
-    client = FakeClient({"P1": 0, "P2": 9, "P3": 9, "P4": 6})  # live P4: 6/300 then 6/300 more (same fake rate)
-    ctx = ctx_for(tmp_path, client)
+    client = FakeClient({"P1": 0, "P2": 9, "P3": 9, "P4": 6})  # live P4: 5/300 then 6/300 more
+    ctx = ctx_for(tmp_path, client, live_fails=5)
     out = ps._check_workflow(ctx, "w", "P4")
     assert [c for c in client.calls if c[0] == "P4"] == [("P4", settings.SIBLING_TOPUP_N)]
-    assert out["phase"] is None  # pooled live 12/600 = 2%: lower bound 1.2% < half the 3% tolerance
+    assert out["phase"] is None  # pooled live 11/600 = 1.8%: lower bound 1.1% < half the 3% tolerance
