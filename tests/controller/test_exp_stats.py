@@ -94,3 +94,43 @@ def test_holm_stops_at_first_failure_and_alpha_adjusts():
     assert seen == [0.02, 0.03, 0.06]
     out = es.holm_order({"A": 1.0, "B": 5.0}, 2, 0.05, lambda a, arm: 2.0)
     assert out["B"]["rejected"] and not out["A"]["rejected"]
+
+
+def test_stratified_single_stratum_equals_plain_contrast():
+    rng = random.Random(3)
+    arm = {i: (3.0, float(sum(rng.random() < 0.55 for _ in range(3)))) for i in range(200)}
+    ctl = {1000 + i: (3.0, float(sum(rng.random() < 0.45 for _ in range(3)))) for i in range(200)}
+    a, b = es.contrast(arm, ctl), es.contrast_strata([(arm, ctl)])
+    assert b.effect == pytest.approx(a.effect) and b.se == pytest.approx(a.se) and b.z == pytest.approx(a.z)
+
+
+def test_stratification_removes_share_and_base_rate_confounding():
+    # day 1: arm is 90% of traffic at a LOW base rate; day 2: arm is 10% at a HIGH base rate; true lift 0
+    d1_arm = {i: (1.0, float(i % 10 < 3)) for i in range(900)}
+    d1_ctl = {5000 + i: (1.0, float(i % 10 < 3)) for i in range(100)}
+    d2_arm = {10000 + i: (1.0, float(i % 10 < 7)) for i in range(100)}
+    d2_ctl = {20000 + i: (1.0, float(i % 10 < 7)) for i in range(900)}
+    pooled_arm, pooled_ctl = {**d1_arm, **d2_arm}, {**d1_ctl, **d2_ctl}
+    assert es.contrast(pooled_arm, pooled_ctl).effect < -0.3  # Simpson: the naive pooled contrast is badly biased
+    c = es.contrast_strata([(d1_arm, d1_ctl), (d2_arm, d2_ctl)])
+    assert abs(c.effect) < 0.02
+
+
+def test_stratified_empty_strata_are_skipped_and_none_when_nothing_to_compare():
+    arm = {1: (2.0, 1.0)}
+    assert es.contrast_strata([]) is None and es.contrast_strata([(arm, {})]) is None
+    ctl = {2: (2.0, 1.0)}
+    assert es.contrast_strata([(arm, {}), (arm, ctl)]).effect == pytest.approx(0.0)
+
+
+def test_a_lead_in_two_strata_is_one_cluster():
+    arm1, ctl1 = {1: (2.0, 2.0), 2: (2.0, 0.0)}, {3: (2.0, 1.0), 4: (2.0, 1.0)}
+    c = es.contrast_strata([(arm1, ctl1), (arm1, ctl1)])
+    assert c.clusters == 4
+
+
+def test_look_after_the_full_information_look_has_no_alpha_left():
+    assert math.isfinite(es.obf_boundary([0.5, 1.0], 0.05))
+    assert es.obf_boundary([0.5, 1.0, 1.0], 0.05) == math.inf
+    assert es.obf_boundary([0.5, 1.0, 1.4], 0.05) == math.inf
+    assert math.isfinite(es.obf_boundary([0.5, 0.5], 0.05))  # same information: the earlier boundary stands

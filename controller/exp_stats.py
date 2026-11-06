@@ -79,6 +79,42 @@ def contrast(arm: Rows, control: Rows, scale: str = "log") -> Contrast | None:
     return Contrast(n_a, n_c, p_a, p_c, effect, se, z, g)
 
 
+def contrast_strata(strata: Sequence[tuple[Rows, Rows]]) -> Contrast | None:
+    """Mantel-Haenszel-style pooled log-ratio of arm vs control over strata (share regime x day).
+
+    Within a stratum the allocation is constant, so arm and control are directly comparable; pooling the strata
+    with MH weights ``w_s = n_a n_c / (n_a + n_c)`` removes the confounding of a time-varying share or base rate.
+    Variance: per-lead sandwich over the lead's influence summed across strata (a lead seen on several days or
+    regimes is ONE cluster). With a single stratum this equals ``contrast``.
+    """
+    parts = []
+    for arm, ctl in strata:
+        n_a, x_a = totals(arm)
+        n_c, x_c = totals(ctl)
+        if n_a > 0 and n_c > 0:
+            parts.append((arm, ctl, n_a, x_a, n_c, x_c, n_a * n_c / (n_a + n_c)))
+    if not parts:
+        return None
+    big_a = sum(w * x_a / n_a for _, _, n_a, x_a, _, _, w in parts)
+    big_c = sum(w * x_c / n_c for _, _, _, _, n_c, x_c, w in parts)
+    if big_a <= 0 or big_c <= 0:
+        return None
+    psi: dict[int, float] = {}
+    for arm, ctl, n_a, x_a, n_c, x_c, w in parts:
+        p_a, p_c = x_a / n_a, x_c / n_c
+        for lid, (n_i, x_i) in arm.items():
+            psi[lid] = psi.get(lid, 0.0) + w / n_a * (x_i - p_a * n_i) / big_a
+        for lid, (n_i, x_i) in ctl.items():
+            psi[lid] = psi.get(lid, 0.0) - w / n_c * (x_i - p_c * n_i) / big_c
+    g = len(psi)
+    sq = sum(v * v for v in psi.values()) * (g / (g - 1) if g > 1 else 1.0)
+    se = math.sqrt(sq)
+    tot_w = sum(p[6] for p in parts)
+    effect = math.log(big_a / big_c)
+    return Contrast(sum(p[2] for p in parts), sum(p[4] for p in parts), big_a / tot_w, big_c / tot_w, effect, se,
+                    effect / se if se > 0 else 0.0, g)
+
+
 # ------------------------------------------------------------------ Lan-DeMets O'Brien-Fleming
 def obf_spend(t: float, alpha: float) -> float:
     """Cumulative one-sided alpha spent at information fraction ``t``."""
@@ -132,15 +168,18 @@ def _boundaries(ts: tuple[float, ...], alpha: float) -> tuple[float, ...]:
 
 
 def obf_boundary(ts: Sequence[float], alpha: float) -> float:
-    """Boundary of the LAST look in ``ts`` given the earlier looks' information fractions."""
+    """Boundary of the LAST look in ``ts`` given the earlier looks' information fractions.
+
+    All alpha is spent at information 1: a look at t >= 1 after a look at t = 1 has none left (+inf).
+    """
     clean: list[float] = []
     for t in ts:
         t = round(min(1.0, max(float(t), 0.01)), 2)  # 0.01 resolution keeps the boundary cache small
+        if clean and clean[-1] >= 1.0 and t >= 1.0:
+            return math.inf
         if not clean or t > clean[-1] + 1e-9:
             clean.append(t)
     if not clean:
-        return math.inf
-    if clean[-1] >= 1.0 and len(clean) > 1 and clean[-2] >= 1.0:
         return math.inf
     return _boundaries(tuple(clean), round(alpha, 8))[-1]
 
