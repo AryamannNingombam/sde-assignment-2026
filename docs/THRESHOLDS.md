@@ -46,3 +46,56 @@ pickup rate: n=100 -> 15%, n=150 -> 12%, n=1000 -> 4.7%.
 | `HALLUC_RECHECK_FAILS` | 4 ticks | A production-triggered incident whose spike no longer holds on 4 consecutive evaluations (1 h) closes as a false alarm and the blacklist is lifted. | - |
 | `HALLUC_BAD_EXPIRY_MINUTES` | 2 days | A blacklisted prompt is reconsidered after 2 days (evidence ages, supervisors fix prompts). | - |
 | `INCIDENT_CREDIT_DAILY_CAP` | 30 per workflow per day | One incident may spend 25; the daily cap stops repeated false incidents draining credits. | - |
+
+## Solo-DID own-history test (A1)
+
+Used when a caller ID has no usable peer step test (a single active DID, or probes too thin to give peers 150
+dials per window). The recent window is compared with the DID's own preceding 48 h at the (hour-of-day, cell)
+level, times the change the fatigue curve predicts from its own load trajectory.
+
+| Name | Value | Derivation | Sensitivity |
+|---|---|---|---|
+| `DID_SOLO_REF_HOURS` | 48 | The reference must contain every hour-of-day of the window, so it spans two days; a longer reference averages over fatigue drift. At 2,000 dials/day it holds ~4,000 dials (se_rel 3%). | 24 h can lack the window's hours of day; 96 h dilutes a slow decline. |
+| `DID_SOLO_SHRINK_N` | 30 | An (hour, cell) rate from a few dials is shrunk toward the hour's pooled rate with 30 pseudo-dials: it removes lead-mix change without letting a sparse cell dominate. | 0 = noisy cell rates; 100 = hour-only adjustment. |
+| `DID_SOLO_P_FACTOR` | 0.1 | Level = `DID_FLAG_P` x 0.1 (1e-6; 1e-8 while the curve is unfitted). No peer absorbs a common shock, so the bar is stricter; with the 12% effect-size gate and 2-eval persistence a 6 h window needs a ~25% drop at 1,200 dials. | 1.0 flags 12-25% steps but would flag on lead-mix drift. |
+| `DID_SOLO_DAYS_BACK` | 4 | Cube days loaded: window + reference. | - |
+
+## Sibling prompt safety check (A2)
+
+| Name | Value | Derivation | Sensitivity |
+|---|---|---|---|
+| `SIBLING_MAX` | 3 | At most 3 other catalogue prompts per workflow, in catalogue order (summaries are never read: R5). | More siblings spend more of the 200 credits for the same single decision. |
+| `SIBLING_N` | 200 | 2 credits per sibling. | At n=200 a 0.9% failure rate cannot be separated from a 2.7% one without a top-up (below). |
+| `SIBLING_TOPUP_N` | 300 | One 3-credit top-up when the sibling's observed rate is below the live prompt's lower bound but its upper bound still overlaps. | Pooled n=500 lets the bounds separate a ~1 pp gap only about half the time. |
+| `SIBLING_BOUND_Z` | 1.645 | One-sided 95% Wilson bounds on each side: sibling upper bound < live lower bound ("clearly safer"). | 1.96 needs roughly 40% more n. |
+| credits | - | Routine spend rule: after every run the balance must still hold `CREDIT_RESERVE_PER_WORKFLOW` x workflows. | - |
+
+Verification after apply reuses the C8 constants (`HALLUC_VERIFY_*`, flag margin = a third of the workflow's
+tolerance, engagement guardrail). Engagement is not checked before apply (a catalogue prompt has no engagement
+history): a switch can cost engagement relative to a permissive prompt, which is why a failed verification rolls back.
+
+## Shared cohorts (C2)
+
+| Name | Value | Derivation | Sensitivity |
+|---|---|---|---|
+| `COHORT_MIN_DIALS_PER_HOUR` | 100 | n_min = 100 x in-window hours (1,000 dials for a 10 h window). A cohort-hour pickup rate from 100 dials has se_rel 15% (see notation), the smallest at which the shrinkage estimate is not mostly prior. Groups below n_min fall into `default`. | 200: fewer, larger cohorts; 50: se_rel 21%, cohorts mostly shrunk to pooled. |
+| `COHORT_MAX` | 20 | The sim's limit; the largest groups are kept. | - |
+| `COHORT_MIN_Z` | 3.72 | The group x hour likelihood-ratio statistic is converted to a df-comparable z (Wilson-Hilferty) and must beat one-sided p<1e-4 = 1e-3 / 10 candidate partitions (4 features + 6 pairs). A BIC penalty was tried and rejected: it discards a real age effect (LR 114, df 27) on 27k dials. | 3.09 (p=1e-3) adds a false partition about 1 time in 100 null workflows. |
+| `COHORT_PAIR_MARGIN_Z` | 2.0 | A feature pair must beat the best single feature by 2 z (parsimony: pairs add df and fragment volume). | - |
+
+The score uses a separable (group + hour) multiplicative model as the null, so pickup LEVEL differences between
+groups score zero: only differing hour PROFILES, which per-cohort tables can exploit, count. Cohorts are the groups of
+one feature (or pair), so they are disjoint and first-match order cannot matter (`is_partition` checks it).
+
+## Per-cohort call time (C4a)
+
+| Name | Value | Derivation | Sensitivity |
+|---|---|---|---|
+| shrinkage | empirical Bayes | B = tau^2 / (tau^2 + v), v = m/E the sampling variance of an O/E multiplier, tau^2 the between-cohort variance estimated from the same data (0 when cohorts do not differ: tables collapse to the pooled profile). No tunable. | - |
+| `SCHEDULE_WEIGHT_CLIP` | 0.3-3.0 | CONTEXT C4a. Weights are mean-1 over the window and clipped; every in-window hour is present. | - |
+| `SCHEDULE_HISTORY_DAYS` | 14 | Days of calls for the multipliers. | Longer: more data, slower to see a drift. |
+| `SCHEDULE_BUNDLE_MIN_LIFT` | 0.05% | The Day-0 bundle's value is the significant partition (the shared cohort object); the tables only have to be an estimated non-loss. | - |
+| `SCHEDULE_MIN_LIFT` | 0.5% | A refresh needs an estimated relative pickup gain of at least a quarter of the 2% guardrail, else it is churn. | 0.1%: daily refreshes chasing noise. |
+| guardrail | `engagement_rate_max_drop` | The dry run re-weights recent dials (capacity per hour fixed, cohort share proportional to volume x weight) and re-composes engagement of connected leads; the change is blocked if the estimated absolute drop exceeds the workflow's guardrail (A3). | - |
+| `SCHEDULE_VERIFY_MIN_DIALS` / `_DONE_DIALS` | 1,500 / 4,000 | Post-apply dials needed to evaluate / finalise the before-after check. se of a standardised pickup difference at 1,500 dials per side is ~1.6 pp (0.28 base). | - |
+| `SCHEDULE_VERIFY_P` | 0.05 | Roll back only if the hour-mix-adjusted pickup (or engagement) fell by at least the guardrail AND one-sided p<0.05. There is no concurrent control, so the check is confounded (lead mix, DID changes) and conservative. | - |
