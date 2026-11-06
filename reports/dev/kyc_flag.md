@@ -4,48 +4,47 @@
 
 | workflow | conclusion rate | Δ | pickup | Δ | engagement | Δ | engagement gap captured | hallucinated calls (base) |
 |---|---|---|---|---|---|---|---|---|
-| ks_cancel | 0.381 | +9.8% | 0.261 | +8.5% | 0.498 | +0.5% | 0% | 78 (85) |
-| nw_kyc | 0.284 | +24.9% | 0.189 | +18.8% | 0.597 | +1.9% | 0% | 27 (16) |
-| nw_renewal | 0.473 | +17.1% | 0.286 | +9.1% | 0.550 | +5.8% | 18% | 146 (331) |
-| ALL | 0.391 | +14.8% | 0.255 | +10.1% | 0.532 | +3.0% | 11% | 251 (432) |
+| ks_cancel | 0.379 | +9.1% | 0.261 | +8.8% | 0.494 | -0.2% | 0% | 74 (85) |
+| nw_kyc | 0.283 | +24.5% | 0.186 | +17.2% | 0.601 | +2.6% | 0% | 11 (16) |
+| nw_renewal | 0.471 | +16.6% | 0.287 | +9.8% | 0.544 | +4.6% | 17% | 73 (331) |
+| ALL | 0.389 | +14.2% | 0.256 | +10.3% | 0.528 | +2.3% | 11% | 158 (432) |
 
 ## Changes applied by the controller
 
-11 applied — neutral: 5, beneficial: 5, harmful: 1
+10 applied — neutral: 6, beneficial: 4
 
 - ks_cancel v2 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.004 → **neutral**
 - nw_renewal v2 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.004 → **neutral**
 - ks_cancel v3 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.025 → **beneficial**
-- nw_renewal v3 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.042 → **beneficial**
+- nw_renewal v3 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.003 → **neutral**
 - ks_cancel v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.016 → **neutral**
+- nw_renewal v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.042 → **beneficial**
 - nw_kyc v2 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.011 → **neutral**
-- nw_renewal v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.017 → **neutral**
-- nw_renewal v6 (controller_approved) dims=['prompt_version'] engageΔ=+0.102 didΔ=+0.000 → **beneficial**
-- nw_renewal v7 (controller_approved) dims=['prompt_version'] engageΔ=-0.139 didΔ=+0.000 → **harmful**
+- nw_renewal v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.017 → **neutral**
+- nw_renewal v7 (controller_approved) dims=['prompt_version'] engageΔ=+0.102 didΔ=+0.000 → **beneficial**
 - nw_kyc v3 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.772 → **beneficial**
-- nw_renewal v8 (controller_approved) dims=['prompt_version'] engageΔ=+0.218 didΔ=+0.000 → **beneficial**
 
 ## Governance
 
 ```
 {
-  "approval_requests": 6,
+  "approval_requests": 4,
   "decisions": {
     "rejected": 1,
-    "approved": 5,
+    "approved": 3,
     "expired": 0
   },
   "rejection_reasons": {
     "approver declined (judgement call)": 1
   },
-  "applied_via_approval": 5,
-  "auto_applied": 6,
+  "applied_via_approval": 3,
+  "auto_applied": 7,
   "auto_apply_rejected": 0,
   "apply_conflicts": 0,
   "lapsed": 0,
   "peak_requests_per_24h": {
     "nw_kyc": 1,
-    "nw_renewal": 2
+    "nw_renewal": 1
   }
 }
 ```
@@ -59,20 +58,20 @@
     "workflow": "nw_kyc",
     "at": "D3 11:00",
     "flagged_did_share_by_day": {
-      "3": 0.986,
-      "4": 0.983,
-      "5": 0.979,
-      "6": 0.985,
-      "7": 0.801,
-      "8": 0.656,
-      "9": 0.481
+      "3": 0.984,
+      "4": 0.981,
+      "5": 0.975,
+      "6": 0.974,
+      "7": 0.807,
+      "8": 0.646,
+      "9": 0.499
     }
   },
   {
     "type": "supervisor_edit",
     "workflow": "nw_renewal",
     "at": "D4 12:00",
-    "mttr_minutes": 405,
+    "mttr_minutes": 345,
     "fixed_by": "controller_approved"
   }
 ]
@@ -84,4 +83,4 @@
 {}
 ```
 
-Credits used: 21 · validation runs: 6 · LLM fix calls: 1
+Credits used: 9 · validation runs: 3 · LLM fix calls: 0
