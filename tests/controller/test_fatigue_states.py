@@ -55,15 +55,43 @@ def test_soft_cap_not_before_11_is_routine_only_and_from_settings():
     assert fatigue.filing_window_ok(at(0, 10, 30), KESTREL, True, "unlisted_workflow")[0]  # default: none
 
 
-def test_budget_reserves_the_last_slot():
-    assert fatigue.routine_budget(RENEWAL, "nw_renewal") == 2
+def tier_ok(used, gov, prio, wid="x"):
+    return fatigue.slot_available(used, gov, prio, wid)[0]
+
+
+@pytest.mark.parametrize("total,routine,severe", [(2, 1, 1), (3, 1, 2), (4, 2, 3)])
+def test_slot_tiers_per_budget_size(total, routine, severe):
+    gov = {"max_requests_per_24h": total}
+    assert fatigue.routine_budget(gov, "x") == min(routine, 2 if total == 4 else routine)
+    assert fatigue.severe_budget(gov) == severe
+    assert fatigue.slot_limit(gov, Priority.INCIDENT, "x") == total
+    # the last slot is safety-only
+    assert tier_ok(total - 1, gov, Priority.INCIDENT)
+    assert not tier_ok(total - 1, gov, Priority.SEVERE)
+    assert not tier_ok(total - 1, gov, Priority.ROUTINE)
+    assert not tier_ok(total, gov, Priority.INCIDENT)
+    # a rollback may use the second-to-last slot, routine bundles stop earlier when total > 2
+    assert tier_ok(total - 2, gov, Priority.SEVERE)
+    assert tier_ok(total - 2, gov, Priority.ROUTINE) == (total - 2 < fatigue.routine_budget(gov, "x"))
+
+
+def test_rollback_never_blocks_a_safety_fix():
+    for total in (2, 3, 4):
+        gov = {"max_requests_per_24h": total}
+        used = 0
+        while tier_ok(used, gov, Priority.SEVERE):  # rollbacks spend every slot they are allowed
+            used += 1
+        assert tier_ok(used, gov, Priority.INCIDENT), total
+
+
+def test_budget_tiers_on_real_policies():
+    assert fatigue.routine_budget(RENEWAL, "nw_renewal") == 1
     assert fatigue.routine_budget(KYC, "nw_kyc") == 1
-    assert fatigue.routine_budget(KESTREL, "ks_cancel") == 2  # soft cap 2 < policy 4 - 1
-    assert fatigue.routine_budget(KESTREL, "other") == 3
+    assert fatigue.routine_budget(KESTREL, "ks_cancel") == 2  # soft cap 2 = max(1, 4 - 2)
     assert fatigue.routine_budget({"max_requests_per_24h": 1}, "x") == 0
-    assert fatigue.slot_available(1, KYC, True, "nw_kyc")[0] is False  # routine cannot use slot 2
-    assert fatigue.slot_available(1, KYC, False, "nw_kyc")[0] is True  # incident can
-    assert fatigue.slot_available(2, KYC, False, "nw_kyc")[0] is False
+    assert fatigue.slot_available(1, KYC, Priority.ROUTINE, "nw_kyc")[0] is False
+    assert fatigue.slot_available(1, KYC, Priority.INCIDENT, "nw_kyc")[0] is True
+    assert fatigue.slot_available(2, KYC, Priority.INCIDENT, "nw_kyc")[0] is False
 
 
 # ------------------------------------------------------------------ ledger over the proposals table

@@ -92,7 +92,7 @@ class Governance:
         """P4 + P5 for an approval request: budget (reserved last slot) and timing."""
         gov = self.workflows[wid]["governance"]
         routine = priority == Priority.ROUTINE
-        ok, why = slot_available(self.requests_used(wid, now), gov, routine, wid)
+        ok, why = slot_available(self.requests_used(wid, now), gov, priority, wid)
         if not ok:
             return False, why
         return filing_window_ok(now, gov, routine, wid, expires_in_hours)
