@@ -149,3 +149,16 @@ SIBLING_MAX = 3  # catalogue siblings validated per workflow, in catalogue order
 SIBLING_N = 200  # modest validation size: 2 credits each
 SIBLING_TOPUP_N = 300  # one top-up (3 credits) for a sibling that looks clearly better but is not yet separated
 SIBLING_BOUND_Z = 1.645  # one-sided 95% Wilson bounds: sibling upper bound must lie below the live prompt's lower bound
+
+# --- Phase 5: shared cohorts (C2) and per-cohort call time (C4a) (docs/THRESHOLDS.md) ----
+COHORT_MIN_DIALS_PER_HOUR = 100  # n_min per cohort = this x in-window hours: se_rel(100) = 15% per (cohort, hour) rate
+COHORT_MAX = 20  # the sim's limit
+COHORT_FEATURE_SUBSETS = 2  # partitions use one feature or a pair of features
+SCHEDULE_HISTORY_DAYS = 14  # days of calls used for the hour multipliers
+SCHEDULE_WEIGHT_CLIP = (0.3, 3.0)  # CONTEXT C4a
+SCHEDULE_MIN_LIFT = 0.005  # a bundle / refresh is proposed only if the estimated relative pickup lift is >= 0.5%
+SCHEDULE_ENG_SHRINK_N = 20  # connects of pseudo-evidence pulling a cohort-hour engagement toward the cohort mean
+SCHEDULE_VERIFY_MIN_DIALS = 1500  # post-apply dials before the before/after pickup check is evaluated
+SCHEDULE_VERIFY_DONE_DIALS = 4000  # ... and after which a passing check is final
+SCHEDULE_VERIFY_P = 0.05  # one-sided p for "pickup fell by at least the guardrail"
+SCHEDULE_MIN_HISTORY_DAYS_COLD = 1  # cold start: build cohorts from this many full days of live data
