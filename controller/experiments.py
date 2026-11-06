@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Mapping
 
-from . import exp_alloc, exp_data, exp_decay, exp_stats as es, exp_proposals as prop, exp_rules as er, exp_state as xs, settings
+from . import exp_alloc, exp_data, exp_decay, exp_reconcile, exp_stats as es, exp_proposals as prop, exp_rules as er, exp_state as xs, settings
 from .cohorts import VOCAB_META_KEY, FeatureVocab
 from .desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from .detectors import did_plan
@@ -61,8 +61,8 @@ def _snapshot(st: dict) -> dict:
 def _set_desired(st: dict, weights, kind: str, summary: str, rationale: str, *, severe=False, then=None,
                  cohort_weights=None, extra: Mapping | None = None, impact: float | None = None,
                  prev: Mapping | None = None) -> None:
-    prev = st.get("desired")
-    severe = severe or bool(prev and prev.get("severe"))
+    earlier = st.get("desired")
+    severe = severe or bool(earlier and earlier.get("severe"))
     st["desired"] = {"weights": dict(weights), "cohort_weights": cohort_weights or {}, "kind": kind,
                      "summary": summary, "rationale": rationale, "severe": severe, "then": then,
                      "evidence": dict(extra or {}), "impact": impact, "prev": prev}
@@ -163,6 +163,20 @@ def _watch(ctx: PlanContext, st: dict, wid: str, dim: str, cfg: tuple[int, dict]
                           f"treating it as the control. ")
         st["control"], st["live"], st["desired"] = xs.top_option(live_dist), live_dist, None
     return st
+
+
+def _reconcile(ctx: PlanContext, st: dict, wid: str, dim: str, cfg: tuple[int, dict]) -> None:
+    """Re-raise a change that never landed (the live config is the truth; see exp_reconcile)."""
+    lost = exp_reconcile.lost_change(st, dim, xs.live_dist(cfg[1], dim))
+    if lost is None:
+        return
+    kind = "experiment_harm_stop" if lost["harm"] else "experiment_update"
+    _set_desired(st, lost["weights"], kind, lost["summary"], lost["rationale"], severe=lost["severe"],
+                 then=xs.RUNNING if st["shares"] else xs.CLOSED, prev=lost["prev"],
+                 extra={"ramp": lost["ramp"], "drop": lost["drop"], "reconciled": True},
+                 impact=1.0 if lost["severe"] else None)
+    ctx.store.add_decision(ctx.now, "experiment_reconcile", lost["summary"], wid,
+                           {"dim": dim, "live": st["live"], "weights": lost["weights"], "drop": lost["drop"], "ramp": lost["ramp"]})
 
 
 # ------------------------------------------------------------------ looks
@@ -376,6 +390,7 @@ def _step(ctx: PlanContext, wid: str, dim: str, wf: Mapping) -> None:
     st = xs.load(ctx.store, wid, dim) or _new_state(wf, dim, cfg)
     before = json.dumps(st, sort_keys=True)
     st = _watch(ctx, st, wid, dim, cfg)
+    _reconcile(ctx, st, wid, dim, cfg)
     pending_promotion = bool(st["desired"] and st["desired"]["kind"] == "experiment_promote")
     if st["phase"] == xs.PENDING:
         if ctx.now >= st["not_before"] and not st["desired"]:
@@ -443,6 +458,7 @@ def experiments_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
 
 # ------------------------------------------------------------------ apply-time veto
 PROMOTE_KINDS = ("experiment_promote", "experiment_stage2")
+RISK_KINDS = ("experiment_harm_stop", "experiment_rollback")
 
 
 def _recent_contrast(ctx, st, wid, dim, promo):
@@ -512,7 +528,10 @@ def experiments_veto(ctx: PlanContext, wid: str, kind: str) -> str | None:
             reason = _veto_promotion(ctx, st, wid, dim, d)
         elif d["kind"] == "experiment_update":
             reason = _veto_update(ctx, st, wid, dim, d)
-        if reason:
+        if reason and kind in RISK_KINDS:  # approved as a bundle with a risk-reducing change: never withhold that
+            ctx.store.add_decision(ctx.now, "experiment_stale_part_applied", f"{reason}; applied anyway because the bundle "
+                                   f"carries {kind}; the next look re-evaluates from the live config", wid, {"dim": dim, "kind": d["kind"]})
+        elif reason:
             _withhold(ctx, st, wid, dim, d, reason)
             reasons.append(reason)
         elif d["kind"] == kind:
