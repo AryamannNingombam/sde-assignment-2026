@@ -212,7 +212,7 @@ def test_controller_gives_up_after_repeated_advance_failures(client, store, monk
 def test_status_cli(client, store, world, tmp_path, capsys):
     Controller(client, store, stop_at_minute=0, registry=Registry()).run()
     store.close()
-    assert cli_main(["status", "--state-dir", str(store.path.parent)]) == 0
+    assert cli_main(["status", "--json", "--state-dir", str(store.path.parent)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["calls"] > 0 and out["cursor"]["event_id"] == world.event_seq
     assert cli_main(["status", "--state-dir", str(tmp_path / "empty")]) == 1

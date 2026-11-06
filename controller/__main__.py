@@ -1,4 +1,4 @@
-"""CLI: ``python -m controller run|status``."""
+"""CLI: ``python -m controller run|status|why|view|ui``."""
 from __future__ import annotations
 
 import argparse
@@ -90,20 +90,69 @@ def cmd_why(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_ro(args: argparse.Namespace):
+    from . import view_data
+    db = _resolve_db(args)
+    if db is None or not db.exists():
+        print(f"no state database found ({db or args.state_dir})")
+        return None
+    try:
+        return view_data.open_readonly(db)
+    except Exception as exc:  # noqa: BLE001 - a foreign/corrupt file must give a message, not a traceback
+        print(f"cannot open {db} read-only: {exc}")
+        return None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
-    db = _latest_db(args.state_dir)
-    if db is None:
-        print(f"no state databases in {args.state_dir}")
+    from . import metrics
+    store = _open_ro(args)
+    if store is None:
         return 1
-    dbs = [db]
-    store = Store(dbs[0])
-    cursor = store.get_cursor()
-    out = {"db": str(dbs[0]), "cursor": {"chunk": cursor.last_chunk, "event_id": cursor.last_event_id},
-           "calls": store.count("calls"), "leads": store.count("leads"),
-           "alerts": store.count("alerts"), "decisions": store.count("decisions"),
-           "last_metrics": store.last_metric()}
-    print(json.dumps(out, indent=2))
+    try:
+        m = metrics.collect(store)
+        if args.json:
+            cur = store.get_cursor()
+            print(json.dumps({**m, "cursor": {"chunk": cur.last_chunk, "event_id": cur.last_event_id}}, indent=2, default=str))
+        else:
+            print(metrics.render(m))
+    finally:
+        store.close()
     return 0
+
+
+def cmd_view(args: argparse.Namespace) -> int:
+    from . import view, view_data
+    store = _open_ro(args)
+    if store is None:
+        return 1
+    try:
+        now = audit.parse_at(args.at) if args.at else view_data.now_minute(store)
+        if args.weekly:
+            print(view.render_weekly(view_data.weekly_auto_applies(store, args.workflow, now), now, args.workflow))
+            return 0
+        known = view_data.workflow_ids(store)
+        if not args.workflow:
+            print("workflows: " + ", ".join(known) + "\n(give --workflow, or --weekly)")
+            return 2
+        if args.workflow not in known:
+            print(f"unknown workflow {args.workflow!r}; known: {', '.join(known)}")
+            return 2
+        print(view.render(view_data.build(store, args.workflow, now)))
+    except ValueError as exc:
+        print(exc)
+        return 2
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    from . import ui
+    db = _resolve_db(args)
+    if db is None or not db.exists():
+        print(f"no state database found ({db or args.state_dir})")
+        return 1
+    return ui.serve(db, args.port, args.host)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,6 +167,19 @@ def main(argv: list[str] | None = None) -> int:
                      help="dev: stop (exit 0) after this many simulated minutes from now")
     status = sub.add_parser("status")
     status.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    status.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
+    status.add_argument("--json", action="store_true")
+    view = sub.add_parser("view", help="one-screen supervisor summary (read-only)")
+    view.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    view.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
+    view.add_argument("--workflow")
+    view.add_argument("--at", help='view as of a time, e.g. "Day 3 14:00" (default: latest)')
+    view.add_argument("--weekly", action="store_true", help="operational auto-applies of the last 7 days (Compliance)")
+    ui = sub.add_parser("ui", help="read-only web view; separate process, never started by run.sh")
+    ui.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    ui.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
+    ui.add_argument("--port", type=int, default=8800)
+    ui.add_argument("--host", default="127.0.0.1")
     why = sub.add_parser("why", help="explain which config was active at a time and why")
     why.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
     why.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
@@ -132,7 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    return {"run": cmd_run, "status": cmd_status, "why": cmd_why}[args.cmd](args)
+    return {"run": cmd_run, "status": cmd_status, "why": cmd_why, "view": cmd_view,
+            "ui": cmd_ui}[args.cmd](args)
 
 
 if __name__ == "__main__":
