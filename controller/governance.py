@@ -309,7 +309,12 @@ class Governance:
         elif ap["status"] == "lapsed":
             self.alert(now, "error", "approval_lapsed", row.proposal_id, row.workflow_id)
             self.repo.transition(row, LAPSED, now, "sim reports lapsed")
-        else:  # the sim says not_approved yet the approval is neither applied nor lapsed: stop retrying
+        elif ap["status"] == "approved":
+            # The POST never reached the sim (crash after apply_intent, or OutcomeUnknown on a lost
+            # request). Leave the row APPROVED: apply_approved re-runs its pre-checks (apply_by,
+            # live version) and retries, or marks it LAPSED/STALE locally WITHOUT calling /apply.
+            return
+        else:  # neither applied, lapsed nor approved: nothing left to retry
             self.alert(now, "error", "apply_unexpected_status",
                        f"{row.proposal_id}: sim status {ap['status']!r} after not_approved", row.workflow_id)
             self.repo.transition(row, STALE, now, f"not applicable: sim status {ap['status']}")
@@ -360,6 +365,7 @@ class Governance:
 
     def _apply(self, row: ProposalRow, now: int) -> ProposalRow | None:
         self.repo.log_only(row, "apply_intent", now, {"approval_id": row.approval_id})
+        crash_point("before-apply-request")
         try:
             resp = self.client.apply_approval(row.workflow_id, row.approval_id)
         except (c.OutcomeUnknown, c.SimUnavailable) as exc:

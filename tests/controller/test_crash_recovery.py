@@ -41,7 +41,7 @@ def test_fault_spec_parsing_and_counting():
     assert codes == [faults.CRASH_EXIT_CODE]  # only the 2nd hit of the named point
     assert set(faults.POINTS) == {"mid-ingest-txn", "after-submit-before-record",
                                   "after-apply-before-record", "after-advance-before-ingest",
-                                  "after-credit-call-before-record"}
+                                  "after-credit-call-before-record", "before-apply-request"}
 
 
 def test_crash_after_submit_before_record_adopts_without_duplicate(client, store, world, monkeypatch):

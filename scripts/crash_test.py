@@ -37,9 +37,10 @@ from controller.faults import CRASH_EXIT_CODE, POINTS  # noqa: E402  (dev toolin
 # Several hits per point: later hits land on later proposals (experiment entries/updates, DID probes, incident fixes).
 # Order matters: the credit point needs the Day 3 hallucination incident, so it goes first and the rest fire after it.
 POINT_ORDER = ["after-credit-call-before-record", "mid-ingest-txn", "after-submit-before-record",
-               "after-apply-before-record", "after-advance-before-ingest"]
+               "after-apply-before-record", "before-apply-request", "after-advance-before-ingest"]
 POINT_HITS = {"mid-ingest-txn": [3, 30], "after-advance-before-ingest": [40],
               "after-submit-before-record": [1, 2], "after-apply-before-record": [1, 2],
+              "before-apply-request": [1, 2],
               "after-credit-call-before-record": [1, 4]}
 TERMINAL_OK = {"APPLIED": {"applied"}, "MONITORING": {"applied"}, "CLOSED": {"applied", "rejected", "expired"},
                "AUTO_APPLIED": set(), "REJECTED": {"rejected"}, "EXPIRED": {"expired"},
