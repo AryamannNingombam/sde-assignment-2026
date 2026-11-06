@@ -300,3 +300,46 @@ def test_late_approval_is_not_applied_and_logs_no_lapse(client, store, world):
     assert a["status"] == "approved"  # /apply was never called
     assert store.conn.execute("select count(*) from alerts where code='approval_lapsed_locally'").fetchone()[0] == 1
     assert_clean_sim_log(world)
+
+
+def _change(kind, prio, weights):
+    return DesiredChange("nw_renewal", kind, prio, {"allocations": {"default": {"voice": weights}}}, summary=kind)
+
+
+def test_rollback_and_safety_fix_in_the_same_tick_share_one_slot(client, store, world):
+    rollback = _change("rollback", Priority.SEVERE, {"V1": 0.8, "V2": 0.2})
+    fix = DesiredChange("nw_renewal", "halluc_fix", Priority.INCIDENT,
+                        {"allocations": {"default": {"welcome_message": {"W1": 0.9, "W2": 0.1}}}}, summary="fix")
+    ctl = make_controller(client, store, lambda c, wid: [rollback, fix] if wid == "nw_renewal" else [])
+    assert run_until(ctl, lambda: pr.PENDING in states(store).values())
+    assert len(states(store)) == 1  # one merged proposal, one slot (P2)
+    row = ctl.gov.repo.get(first_pid(store))
+    assert row.kind == "halluc_fix" and {"voice", "welcome_message"} <= set(row.body["dims"])
+
+
+def test_safety_fix_supersedes_an_in_flight_rollback_using_the_reserved_slot(client, store, world):
+    rollback = _change("rollback", Priority.SEVERE, {"V1": 0.8, "V2": 0.2})
+    fix = DesiredChange("nw_renewal", "halluc_fix", Priority.INCIDENT,
+                        {"allocations": {"default": {"welcome_message": {"W1": 0.9, "W2": 0.1}}}}, summary="fix")
+    on = {"fix": False}
+    ctl = make_controller(client, store, lambda c, wid: ([rollback] + ([fix] if on["fix"] else []))
+                          if wid == "nw_renewal" else [])
+    assert run_until(ctl, lambda: pr.PENDING in states(store).values())
+    on["fix"] = True
+    assert run_until(ctl, lambda: len(states(store)) >= 2)
+    a, b = list(states(store))[:2]
+    row_b = ctl.gov.repo.get(b)
+    assert row_b.supersedes == a and row_b.priority == Priority.INCIDENT
+    assert {"voice", "welcome_message"} <= set(row_b.body["dims"])  # the rollback rides along
+    assert ctl.gov.requests_used("nw_renewal", client.state()["sim_minute"]) == 2
+
+
+def test_rollbacks_cannot_spend_the_safety_slot_but_the_safety_fix_still_files(client, store, world):
+    """Budget 3 (nw_renewal): rollbacks stop at the second-to-last slot; the incident still files."""
+    from controller import fatigue
+    ctl = make_controller(client, store, lambda c, wid: [])
+    gov = ctl.gov.workflows["nw_renewal"]["governance"]
+    assert gov["max_requests_per_24h"] == 3
+    assert fatigue.slot_available(1, gov, Priority.SEVERE, "nw_renewal")[0] is True
+    assert fatigue.slot_available(2, gov, Priority.SEVERE, "nw_renewal")[0] is False
+    assert fatigue.slot_available(2, gov, Priority.INCIDENT, "nw_renewal")[0] is True
