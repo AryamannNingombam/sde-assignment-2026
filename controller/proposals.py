@@ -98,6 +98,8 @@ def validate_auto_apply(draft: ProposalDraft, wf: Mapping) -> list[str]:
     bad = [d for d in draft.dims if d not in pol.get("allowed_dims", [])]
     if bad:
         problems.append(f"dims not permitted for auto-apply: {bad}")
+    if "cohorts" in draft.dims:  # defense in depth: cohort definitions always need approval (README)
+        problems.append("cohort definitions are never auto-applied: dims not permitted for auto-apply: ['cohorts']")
     if draft.max_shift > pol.get("max_shift", 0) + _EPS:
         problems.append(f"allocation shift {draft.max_shift:.3f} exceeds max_shift {pol.get('max_shift', 0)}")
     if not draft.dims:

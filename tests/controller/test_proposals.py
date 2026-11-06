@@ -212,3 +212,10 @@ def test_impact_formula():
 def test_draft_is_frozen():
     with pytest.raises(dataclasses.FrozenInstanceError):
         draft().rationale = "x"
+
+
+def test_cohorts_are_never_auto_applied_even_if_policy_lists_them():
+    wf = {"workflow_id": "x", "governance": {"auto_apply": {
+        "enabled": True, "allowed_dims": ["schedule", "cohorts"], "max_shift": 0.5}}}
+    assert validate_auto_apply(draft(dims=("schedule",)), wf) == []
+    assert any("cohort" in p for p in validate_auto_apply(draft(dims=("schedule", "cohorts")), wf))
