@@ -105,6 +105,8 @@ DID_PASS_RATIO = 1.0 - 1.5 * DID_WEAK_MARGIN
 DID_PASS_Z = 1.645
 DID_WEAK_WINDOW_HOURS = 48
 DID_WEAK_LOAD_SLACK = 1.25  # "comparable load": own load <= peers' load x slack
+DID_WEAK_PERSIST_DAYS = 2  # a weak-base verdict must hold on this many distinct days before a rebalance is planned
+DID_REBALANCE_MIN_HEALTH_GAIN = 0.0  # ... and the rebalance's expected DID-health change must be at least this
 DID_STEP_SAFETY = 0.95  # use at most this fraction of max_shift per auto-apply step
 DID_MIN_TV = 0.005  # smaller allocation moves are not worth an auto-apply
 DID_MIN_TV_APPROVAL = 0.03  # ... nor an approval request (one of the scarce daily slots)

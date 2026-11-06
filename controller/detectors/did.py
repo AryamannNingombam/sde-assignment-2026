@@ -29,7 +29,7 @@ MEMO: dict[tuple[str, str], tuple[int, did_eval.Evaluation, dict]] = {}
 # ------------------------------------------------------------------ persisted verdicts
 def _state(store, wid: str) -> dict:
     st = load_state(store, DETECTOR, wid)
-    for key in ("flagged", "weak", "tested", "reprobe", "pending"):
+    for key in ("flagged", "weak", "tested", "reprobe", "pending", "weak_days"):
         st.setdefault(key, {})
     return st
 
@@ -122,11 +122,22 @@ def _mark_weak_and_tested(ctx: PlanContext, wid: str, ev, st: dict, options) -> 
     for did, res in ev.peers.items():
         if did in st["flagged"] or did in st["weak"]:
             continue
-        if res.weak():
-            st["weak"][did] = {"minute": ctx.now, "q": round(res.q, 4), "z": round(res.z_weak, 3)}
-            ctx.store.add_decision(ctx.now, "did_weak_base",
-                                   f"WEAK BASE {did}: pickup {res.q:.2f}x expected at comparable load "
-                                   f"(z={res.z_weak:.1f}, n={res.n})", wid, res.as_dict())
+        days = st.setdefault("weak_days", {}).setdefault(did, [])
+        if not res.weak():
+            days.clear()  # persistence must be unbroken: a healthy evaluation resets the candidate
+        else:
+            day = ctx.now // 1440
+            if day not in days:
+                days.append(day)
+                ctx.store.add_decision(ctx.now, "did_weak_candidate",
+                                       f"{did} looks weak (pickup {res.q:.2f}x expected, z={res.z_weak:.1f}, n={res.n}); "
+                                       f"day {len(days)} of {settings.DID_WEAK_PERSIST_DAYS} needed before acting", wid,
+                                       res.as_dict())
+            if len(days) >= settings.DID_WEAK_PERSIST_DAYS:
+                st["weak"][did] = {"minute": ctx.now, "q": round(res.q, 4), "z": round(res.z_weak, 3)}
+                ctx.store.add_decision(ctx.now, "did_weak_base",
+                                       f"WEAK BASE {did}: pickup {res.q:.2f}x expected at comparable load "
+                                       f"(z={res.z_weak:.1f}, n={res.n}) on {len(days)} days", wid, res.as_dict())
     for did in options:
         if did not in st["tested"] and status_of(ev, did, st) == TESTED:
             st["tested"][did] = ctx.now
@@ -257,6 +268,8 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         cur = dist(cfg[1], key, "caller_id")
         target = did_plan.target_allocation(cur, status, h_bar(ev, cur))
         step = did_plan.plan_step(cur, target, limit, status)
+        if not _rebalance_not_harmful(ev, st, cfg[1], cur, step):
+            continue
         floor = settings.DID_MIN_TV if limit is not None else settings.DID_MIN_TV_APPROVAL
         if did_plan.tv(cur, step) < floor and not (set(step) - set(cur)):  # a new DID is always worth it
             continue
@@ -266,6 +279,21 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
     if not patch:
         return []
     return [_change(wid, patch, status, st, ev, notes, limit, cfg[1])]
+
+
+def _rebalance_not_harmful(ev, st, cfg: Mapping, cur: Mapping, step: Mapping) -> bool:
+    """A weak-base rebalance (no flagged DID involved) must be expected not to lower DID health.
+
+    Expected health uses each DID's OBSERVED pickup ratio at comparable load and the fatigue curve at the load it
+    would carry after the move; a verdict that came from noise cannot justify moving load onto busier numbers.
+    """
+    if any(_config_share(cfg, d) > 1e-9 for d in st["flagged"]):
+        return True  # incident evacuation: the pickup drop is measured, not assumed
+    if not any(cur.get(d, 0.0) > 1e-9 for d in st["weak"]):
+        return True
+    quality = {d: r.q for d, r in ev.peers.items()}
+    gain = did_plan.expected_health(ev, step, quality) - did_plan.expected_health(ev, cur, quality)
+    return gain >= settings.DID_REBALANCE_MIN_HEALTH_GAIN - 1e-12
 
 
 def _change(wid, patch, status, st, ev, notes, limit, cfg) -> DesiredChange:

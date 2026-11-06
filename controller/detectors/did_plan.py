@@ -123,3 +123,11 @@ def plan_step(current: Mapping[str, float], target: Mapping[str, float], max_shi
         out[k] += put
         left -= put
     return _clean(out)
+
+
+def expected_health(ev, alloc: Mapping[str, float], quality: Mapping[str, float]) -> float:
+    """Expected traffic-weighted pickup health of ``alloc``: per-DID observed pickup ratio at comparable load
+    (``quality``, 1 when unknown) times the fatigue-curve health at the load the DID would carry."""
+    total = sum(alloc.values()) or 1.0
+    load = sum(ev.loads_now.values())
+    return sum((a / total) * quality.get(d, 1.0) * ev.curve.h(load * a / total) for d, a in alloc.items())

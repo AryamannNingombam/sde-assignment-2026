@@ -125,3 +125,76 @@ def test_evaluate_handles_a_reprobe_window_longer_than_the_default_span():
             ser.conns[h] = {"D1": 30, "D2": 30, "D3": 1 if h >= 40 else 0}
     ev = de.evaluate(ser, FatigueCurve.flat(), 199, ["D1", "D2", "D3"], ["D3"], [], {"D3": 40})
     assert ev.total_dials["D3"] > 0 and ev.first_hour["D3"] >= 40
+
+
+# ------------------------------------------------------------------ weak-base persistence and expected-health check
+def peer(did_, q, n=400, z=-4.0):
+    return de.PeerResult(did_, n, int(n * 0.3), n * 0.3, q, z, 10.0, 10.0)
+
+
+class _Store:
+    def __init__(self):
+        self.rows = []
+
+    def add_decision(self, *a, **k):
+        self.rows.append(a)
+
+
+def _ctx(now):
+    return type("C", (), {"now": now, "store": _Store()})()
+
+
+def _state():
+    return {"flagged": {}, "weak": {}, "tested": {}, "reprobe": {}, "pending": {}, "weak_days": {}}
+
+
+def test_a_weak_verdict_needs_two_distinct_days_before_it_is_acted_on():
+    ev = ev_with({})
+    ev.peers = {"D2": peer("D2", 0.6)}
+    st = _state()
+    did._mark_weak_and_tested(_ctx(1000), "w", ev, st, ["D1", "D2"])
+    did._mark_weak_and_tested(_ctx(1100), "w", ev, st, ["D1", "D2"])  # same day: still one day
+    assert "D2" not in st["weak"]
+    did._mark_weak_and_tested(_ctx(1440 + 100), "w", ev, st, ["D1", "D2"])
+    assert "D2" in st["weak"]
+
+
+def test_a_healthy_evaluation_resets_the_weak_candidate():
+    ev = ev_with({})
+    st = _state()
+    ev.peers = {"D2": peer("D2", 0.6)}
+    did._mark_weak_and_tested(_ctx(1000), "w", ev, st, ["D1", "D2"])
+    ev.peers = {"D2": peer("D2", 1.0, z=0.5)}
+    did._mark_weak_and_tested(_ctx(1200), "w", ev, st, ["D1", "D2"])
+    ev.peers = {"D2": peer("D2", 0.6)}
+    did._mark_weak_and_tested(_ctx(1440 + 100), "w", ev, st, ["D1", "D2"])
+    assert "D2" not in st["weak"]
+
+
+class _Busy:
+    def h(self, load):
+        return max(0.0, 1.0 - 0.02 * load)  # steep fatigue
+
+
+def test_rebalance_off_a_weak_did_is_blocked_when_the_load_it_adds_costs_more_than_the_ratio_gains():
+    ev = ev_with({})
+    ev.curve, ev.loads_now = _Busy(), {"D1": 20.0, "D2": 20.0}
+    ev.peers = {"D2": peer("D2", 0.9), "D1": peer("D1", 1.0)}
+    st = _state()
+    st["weak"] = {"D2": {"minute": 0}}
+    cfg = {"allocations": {"default": {"caller_id": {"D1": 0.5, "D2": 0.5}}}, "cohorts": []}
+    assert not did._rebalance_not_harmful(ev, st, cfg, {"D1": 0.5, "D2": 0.5}, {"D1": 1.0})
+
+
+def test_rebalance_off_a_truly_weak_did_is_allowed_and_flagged_evacuations_are_never_blocked():
+    ev = ev_with({})
+    ev.curve, ev.loads_now = FatigueCurve.flat(), {"D1": 20.0, "D2": 20.0}
+    ev.peers = {"D2": peer("D2", 0.5), "D1": peer("D1", 1.0)}
+    st = _state()
+    st["weak"] = {"D2": {"minute": 0}}
+    cfg = {"allocations": {"default": {"caller_id": {"D1": 0.5, "D2": 0.5}}}, "cohorts": []}
+    assert did._rebalance_not_harmful(ev, st, cfg, {"D1": 0.5, "D2": 0.5}, {"D1": 1.0})
+    ev.curve = _Busy()
+    ev.peers = {"D2": peer("D2", 0.9), "D1": peer("D1", 1.0)}
+    st["flagged"] = {"D2": {"minute": 0}}
+    assert did._rebalance_not_harmful(ev, st, cfg, {"D1": 0.5, "D2": 0.5}, {"D1": 1.0})
