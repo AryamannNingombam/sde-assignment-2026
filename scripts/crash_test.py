@@ -104,6 +104,7 @@ class Runner:
         self.url, self.state_dir, self.log, self.timeout = url, state_dir, log, per_run_timeout_s
         self.cursors: list[int] = []
         self.restarts = 0
+        self.kills_delivered = 0
 
     def _spawn(self, env_extra: dict | None) -> subprocess.Popen:
         cmd = [sys.executable, "-m", "controller", "run", "--url", self.url, "--state-dir", str(self.state_dir)]
@@ -142,6 +143,7 @@ class Runner:
         except subprocess.TimeoutExpired:
             proc.kill()
             rc = proc.wait()
+            self.kills_delivered += 1
             self.log(f"KILL RANDOM after {delay:.1f}s")
         self._after("after random kill", rc)
         return rc
@@ -174,7 +176,7 @@ def invariants(url: str, state_dir: Path, run_dir: Path, baseline: Path, runner:
             pid = v["proposal_id"]
             key = (wid, pid)
             row = props.get(pid)
-            if pid is None or row is None or row[2] != v["approval_id"] or row[3] != v["version"] or key in seen:
+            if pid is None or row is None or row[1] != v["approval_id"] or row[2] != v["version"] or key in seen:
                 bad.append(f"{wid} v{v['version']} {v['actor']} proposal={pid} ours={row}")
             seen[key] = v["version"]
     out.append(("every controller_* config version maps to a unique proposal_id in our store (applied_version"
@@ -233,8 +235,8 @@ def main() -> int:
     ap.add_argument("--random-kills", type=int, default=3)
     ap.add_argument("--points", nargs="*", default=list(POINTS))
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--kill-min-s", type=float, default=15)
-    ap.add_argument("--kill-max-s", type=float, default=90)
+    ap.add_argument("--kill-min-s", type=float, default=4)
+    ap.add_argument("--kill-max-s", type=float, default=14)
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--work-dir", default=None, help="default runs/crash_<scenario>")
     ap.add_argument("--log", default=str(ROOT / "reports" / "crash_test.log"))
@@ -275,6 +277,8 @@ def main() -> int:
         state = httpx.get(url + "/sim/state", timeout=30).json()
         log(f"sim state: finished={state['finished']} sim_minute={state['sim_minute']}")
         results = invariants(url, state_dir, run_dir, baseline, runner)
+        results.insert(0, (f"all {args.random_kills} random kills were delivered mid-run (test validity)",
+                           runner.kills_delivered == args.random_kills, f"delivered={runner.kills_delivered}"))
         results.insert(0, ("run completed: controller exit 0 and sim finished", rc == 0 and state["finished"],
                            f"rc={rc}"))
         for label, ok, detail in results:

@@ -1,0 +1,35 @@
+20:13:00 crash test: scenario=scenarios/public_02_incidents.yaml url=http://127.0.0.1:64461 points=['mid-ingest-txn', 'after-submit-before-record', 'after-apply-before-record', 'after-advance-before-ingest'] random_kills=3 seed=7 platform=win32
+20:13:05 simulator up
+20:13:05 RUN with CRASH_AT=mid-ingest-txn:3
+20:13:12 KILL POINT mid-ingest-txn: FIRED (os._exit)
+20:13:12 after mid-ingest-txn:3: exit rc=137; ingest cursor now event_id=187276
+20:13:12 RUN with CRASH_AT=after-submit-before-record:1
+20:13:13 KILL POINT after-submit-before-record: FIRED (os._exit)
+20:13:13 after after-submit-before-record:1: exit rc=137; ingest cursor now event_id=191504
+20:13:13 RUN with CRASH_AT=after-apply-before-record:1
+20:13:15 KILL POINT after-apply-before-record: FIRED (os._exit)
+20:13:15 after after-apply-before-record:1: exit rc=137; ingest cursor now event_id=196230
+20:13:15 RUN with CRASH_AT=after-advance-before-ingest:40
+20:13:18 KILL POINT after-advance-before-ingest: FIRED (os._exit)
+20:13:18 after after-advance-before-ingest:40: exit rc=137; ingest cursor now event_id=205212
+20:13:18 RUN, hard kill (Popen.kill) scheduled after 7.2s wall
+20:13:26 KILL RANDOM after 7.2s
+20:13:26 after random kill: exit rc=1; ingest cursor now event_id=226568
+20:13:26 RUN, hard kill (Popen.kill) scheduled after 5.5s wall
+20:13:31 KILL RANDOM after 5.5s
+20:13:31 after random kill: exit rc=1; ingest cursor now event_id=242099
+20:13:31 RUN, hard kill (Popen.kill) scheduled after 10.5s wall
+20:13:42 KILL RANDOM after 10.5s
+20:13:42 after random kill: exit rc=1; ingest cursor now event_id=276886
+20:13:42 RUN to completion (attempt 1)
+20:13:58 completion run: exit rc=0; ingest cursor now event_id=324322
+20:13:58 controller finished rc=0; restarts=8; wall=58s
+20:13:59 sim state: finished=True sim_minute=14400
+20:13:59 INVARIANT PASS: run completed: controller exit 0 and sim finished -- rc=0
+20:13:59 INVARIANT PASS: all 3 random kills were delivered mid-run (test validity) -- delivered=3
+20:13:59 INVARIANT PASS: every controller_* config version maps to a unique proposal_id in our store (applied_version and approval_id agree) -- 12 versions checked; bad=[]
+20:13:59 INVARIANT PASS: no duplicate applies in our store -- duplicates=[]
+20:13:59 INVARIANT PASS: grade: lapsed 0, apply_conflicts 0, auto_apply_rejected 0 -- {"approval_requests": 4, "decisions": {"approved": 4, "expired": 0}, "rejection_reasons": {}, "applied_via_approval": 4, "auto_applied": 8, "auto_apply_rejected": 0, "apply_conflicts": 0, "lapsed": 0, "peak_requests_per_24h": {"nw_kyc": 1, "ks_cancel": 1}}
+20:13:59 INVARIANT PASS: every proposal is terminal/consistent with GET /approvals; no approval lost -- 12 proposals, 4 approvals; problems=[]
+20:13:59 INVARIANT PASS: ingest cursor monotonic across restarts and == sim last_event_id at the end -- cursors=[187276, 191504, 196230, 205212, 226568, 242099, 276886, 324322] final=324322 sim=324322
+20:13:59 RESULT: ALL INVARIANTS PASS
