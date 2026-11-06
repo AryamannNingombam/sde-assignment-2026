@@ -197,7 +197,8 @@ def evaluate(series: DidSeries, curve: FatigueCurve, cur_hour: int, options: Seq
         refs = [p for p in peers_all if p != d and dw.get(p, 0) >= settings.DID_WEAK_MIN_DIALS and p not in bad]
         if not refs:
             continue
-        for hours in (settings.DID_WEAK_WINDOW_HOURS, long_h):
+        windows = (settings.DID_WEAK_WINDOW_HOURS, long_h) + ((cur_hour - since[d] + 1,) if d in since else ())
+        for hours in windows:
             res = peer_comparison(series, curve, d, range(max(cur_hour - hours + 1, since.get(d, -10**9)), cur_hour + 1),
                                   refs, loads)
             if res is not None and res.n >= settings.DID_PASS_MIN_DIALS:

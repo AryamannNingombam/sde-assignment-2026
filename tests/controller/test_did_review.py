@@ -107,3 +107,10 @@ def test_expiry_invalidates_the_tick_memo_so_the_reprobe_window_is_applied(store
     st = {"flagged": {"D2": {"minute": 0}}, "tested": {}, "reprobe": {}, "weak": {}, "pending": {}}
     did._expire_flags(ctx_at(store, settings.DID_FLAG_COOLDOWN_MINUTES), "w", None, st)
     assert key not in did.MEMO  # otherwise the producer would judge D2 on its pre-flag history and spread onto it
+
+
+def test_reprobed_did_without_a_peer_comparison_never_passes():
+    st = {"flagged": {}, "weak": {}, "tested": {}, "reprobe": {"D2": {"minute": 0}}}
+    ev = de.Evaluation(500, FatigueCurve.flat(), {})
+    ev.total_dials, ev.first_hour = {"D2": 500}, {"D2": 100}  # plenty of dials and age, but no comparison yet
+    assert did.status_of(ev, "D2", st) == dp.REPROBE
