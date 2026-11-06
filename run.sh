@@ -32,15 +32,15 @@ pick_python() {
   for base in python3 python; do command -v "$base" >/dev/null 2>&1 && break; base=""; done
   [ -n "$base" ] || return 1
   echo "run.sh: no interpreter has the dependencies; trying pip install --user" >&2
-  if "$base" -m pip install --user -q -r requirements.txt >&2 && has_deps "$base"; then
+  if "$base" -m pip install --user -q --timeout 15 --retries 1 --disable-pip-version-check -r requirements.txt >&2 && has_deps "$base"; then
     echo "$base"; return 0
   fi
   echo "run.sh: pip --user failed; trying a virtualenv in .venv" >&2
-  if "$base" -m venv .venv >&2 && .venv/bin/pip install -q -r requirements.txt >&2 \
+  if "$base" -m venv .venv >&2 && .venv/bin/pip install -q --timeout 15 --retries 1 --disable-pip-version-check -r requirements.txt >&2 \
       && has_deps .venv/bin/python; then
     echo ".venv/bin/python"; return 0
   fi
-  if [ -x .venv/Scripts/python ] && .venv/Scripts/pip install -q -r requirements.txt >&2 \
+  if [ -x .venv/Scripts/python ] && .venv/Scripts/pip install -q --timeout 15 --retries 1 --disable-pip-version-check -r requirements.txt >&2 \
       && has_deps .venv/Scripts/python; then
     echo ".venv/Scripts/python"; return 0
   fi

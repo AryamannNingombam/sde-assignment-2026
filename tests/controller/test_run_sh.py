@@ -62,3 +62,10 @@ def test_deterministic_crash_reaches_the_restart_cap(tmp_path):
         srv.shutdown()
     assert r.returncode == 1, r.stderr
     assert "restart cap reached" in r.stderr
+
+
+def test_every_pip_call_in_run_sh_has_a_timeout_and_no_version_check():
+    pip_lines = [l for l in (ROOT / "run.sh").read_text().splitlines() if "pip install" in l and "echo" not in l]
+    assert len(pip_lines) >= 3
+    for line in pip_lines:
+        assert "--timeout 15" in line and "--retries 1" in line and "--disable-pip-version-check" in line, line
