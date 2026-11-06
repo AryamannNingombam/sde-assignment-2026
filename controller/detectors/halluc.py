@@ -275,14 +275,16 @@ def _suggest(ctx: PlanContext, wid: str, body: dict, live: str, min_pass: float,
 
 
 def _validate_suggestions(ctx: PlanContext, wid: str, body: dict, live: str, min_pass: float) -> None:
-    runs = []
+    runs, still_pending = [], []
     for prompt in body.get("pending_suggestions", []):
         if prompt == live or prompt in body["tried"] or any(c["prompt"] == prompt for c in body["candidates"]):
-            continue
+            continue  # nothing to validate: drop
         run = _validated(ctx, wid, prompt, body, 0.0)
-        if run is not None:
+        if run is None:
+            still_pending.append(prompt)  # unaffordable right now (cap / credits): keep the paid suggestion
+        else:
             runs.append({"prompt": prompt, **run})
-    body["pending_suggestions"] = []
+    body["pending_suggestions"] = still_pending
     for r in rank_by_failure_bound(runs, min_pass):
         body["candidates"].append(_candidate(r["prompt"], {"run_id": r["run_id"], "pass_rate": r["pass_rate"],
                                                            "n": r["n"]}, "llm") | {"fail_ub": r["fail_ub"]})

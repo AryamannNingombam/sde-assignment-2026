@@ -331,3 +331,15 @@ def test_verify_waits_when_non_inferiority_is_not_yet_resolvable(store):
     st = _verify_state([1600, 24, 1480.0, 900])  # enough data: 1.5% vs 1.3% base is non-inferior at the 1pp margin
     hl._verify(ctx_for(store, FakeClient(), now=6000), "w", inc, st, "P1")
     assert store.conn.execute("select state from incidents").fetchone()[0] == "closed"
+
+
+def test_unvalidated_paid_suggestions_stay_pending_until_affordable(store):
+    """D3: a transient spend refusal must not discard the paid suggestions."""
+    client = FakeClient(credits=0.0)
+    body = new_body()
+    body["pending_suggestions"] = ["P3", "P4"]
+    hl._validate_suggestions(ctx_for(store, client), "w", body, "P2", 0.97)
+    assert body["pending_suggestions"] == ["P3", "P4"] and body["candidates"] == []
+    client.credits = 200.0
+    hl._validate_suggestions(ctx_for(store, client), "w", body, "P2", 0.97)
+    assert body["pending_suggestions"] == [] and len(body["candidates"]) == 2
