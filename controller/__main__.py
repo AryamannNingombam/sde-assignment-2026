@@ -51,18 +51,42 @@ def _latest_db(state_dir: str) -> Path | None:
     return dbs[0] if dbs else None
 
 
+def _resolve_db(args: argparse.Namespace) -> Path | None:
+    if getattr(args, "db", None):
+        return Path(args.db)
+    return _latest_db(args.state_dir)
+
+
+def _build_why(store: Store, args: argparse.Namespace) -> tuple[dict, str] | None:
+    from . import audit_render as ar
+    if args.lead:
+        rep = audit.why_lead(store, args.lead, args.day)
+        return rep, ar.render_lead(rep)
+    if not args.workflow:
+        raise ValueError("--workflow is required unless --lead is given")
+    if args.at:
+        rep = audit.why_at(store, args.workflow, audit.parse_at(args.at))
+        return rep, ar.render_at(rep)
+    if args.from_ and args.to:
+        rep = audit.why_range(store, args.workflow, audit.parse_bound(args.from_),
+                              audit.parse_bound(args.to, end=True))
+        return rep, ar.render_range(rep)
+    raise ValueError("give --at, or --from and --to, or --lead")
+
+
 def cmd_why(args: argparse.Namespace) -> int:
-    db = _latest_db(args.state_dir)
-    if db is None:
-        print(f"no state databases in {args.state_dir}")
+    db = _resolve_db(args)
+    if db is None or not db.exists():
+        print(f"no state database found ({db or args.state_dir})")
         return 1
     try:
-        minute = audit.parse_at(args.at)
+        with Store(db) as store:
+            built = _build_why(store, args)
     except ValueError as exc:
         print(exc)
         return 2
-    with Store(db) as store:
-        print(audit.render(audit.why(store, args.workflow, minute)))
+    rep, text = built  # type: ignore[misc]
+    print(json.dumps(rep, indent=2, default=str) if args.json else text)
     return 0
 
 
@@ -96,8 +120,14 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
     why = sub.add_parser("why", help="explain which config was active at a time and why")
     why.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
-    why.add_argument("--workflow", required=True)
-    why.add_argument("--at", required=True, help='e.g. "Day 3 14:00"')
+    why.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
+    why.add_argument("--workflow")
+    why.add_argument("--at", help='e.g. "Day 3 14:00"')
+    why.add_argument("--from", dest="from_", help='timeline start, e.g. "Day 2"')
+    why.add_argument("--to", help='timeline end (a bare day includes that whole day), e.g. "Day 4"')
+    why.add_argument("--lead", help="lead id: that customer's calls and the decisions behind them")
+    why.add_argument("--day", type=int, default=None, help="with --lead: only calls on this day")
+    why.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,

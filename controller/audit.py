@@ -1,8 +1,14 @@
-"""Audit stub: ``python -m controller why --state-dir state --workflow W --at "Day 3 14:00"``.
+"""Audit queries (CONTEXT C12), answered from OUR store only (R7).
 
-Answers from OUR store only (R7): the active config version, its proposal/approval lifecycle
-and the decision rows behind it. The full version (lead join, monitoring, superseding
-chains) comes with the later phases.
+Three modes, all read-only over the controller's SQLite file:
+
+* :func:`why_at`     - what config was active for a workflow at time T, who/why/approval, after-effects.
+* :func:`why_range`  - a timeline of detections, proposals, decisions, applies and incidents.
+* :func:`why_lead`   - one customer's calls and the decisions behind their allocation and prompt
+  versions (split join for ``next_campaign_only``: allocations come from the call's
+  ``config_version``, the prompt from the version active at the call's timestamp).
+
+Rendering to text lives in :mod:`controller.audit_render`.
 """
 from __future__ import annotations
 
@@ -14,6 +20,15 @@ from . import settings
 from .store import Store
 
 _AT = re.compile(r"^\s*(?:Day|D)\s*(-?\d+)\s+(\d{1,2}):(\d{2})\s*$", re.IGNORECASE)
+_DAY = re.compile(r"^\s*(?:Day|D)\s*(-?\d+)\s*$", re.IGNORECASE)
+_VER_COLS = "version, actor, ts_minute, changed_dims, proposal_id, approval_id"
+# Decision kinds that are per-tick noise; they appear only as "latest evidence", never in timelines.
+_NOISE = ("advance_intent", "did_eval", "halluc_eval", "did_curve_fit", "baselines", "startup", "finished",
+          "stopped", "plan_wait", "advance_recovered")
+_EVIDENCE = ("did_eval", "halluc_eval", "did_flagged", "incident_opened", "validation_run", "did_tested",
+             "did_weak_base", "did_curve_fit")
+_LIFECYCLE_SKIP = ("proposal_draft", "proposal_intent", "proposal_monitoring", "proposal_closed",
+                   "proposal_apply_intent")
 
 
 def parse_at(text: str) -> int:
@@ -25,6 +40,14 @@ def parse_at(text: str) -> int:
     if not (0 <= hour < 24 and 0 <= minute < 60):
         raise ValueError(f"bad time in {text!r}")
     return day * settings.MINUTES_PER_DAY + hour * 60 + minute
+
+
+def parse_bound(text: str, end: bool = False) -> int:
+    """``"Day 2"`` -> start of Day 2 (or, with ``end``, the start of Day 3: the range is inclusive of the day)."""
+    m = _DAY.match(text)
+    if m:
+        return (int(m.group(1)) + (1 if end else 0)) * settings.MINUTES_PER_DAY
+    return parse_at(text)
 
 
 def fmt_minute(minute: int | None) -> str:
@@ -40,68 +63,202 @@ def _rows(store: Store, sql: str, args: tuple = ()) -> list[dict]:
     return [dict(zip(names, r)) for r in cur.fetchall()]
 
 
-def why(store: Store, workflow: str, at_minute: int) -> dict[str, Any]:
-    versions = _rows(
-        store, "SELECT version, actor, ts_minute, changed_dims, proposal_id, approval_id"
-        " FROM config_versions WHERE workflow_id=? AND ts_minute IS NOT NULL AND ts_minute<=?"
-        " ORDER BY version DESC LIMIT 1", (workflow, at_minute))
-    if not versions:  # no change observed yet: the initial version
-        versions = _rows(store, "SELECT version, actor, ts_minute, changed_dims, proposal_id,"
-                         " approval_id FROM config_versions WHERE workflow_id=? ORDER BY version"
-                         " LIMIT 1", (workflow,))
-    out: dict[str, Any] = {"workflow": workflow, "at": fmt_minute(at_minute), "version": None,
-                           "proposal": None, "lifecycle": [], "decisions": [], "superseded_by": []}
-    if not versions:
-        return out
-    ver = versions[0]
-    out["version"] = ver
-    prop = None
-    if ver["proposal_id"]:
-        prop = _rows(store, "SELECT proposal_id, kind, state, route, approval_id, base_version,"
-                     " created_minute, filed_minute, applied_version, applied_minute, supersedes,"
-                     " body FROM proposals WHERE proposal_id=?", (ver["proposal_id"],))
+def _json(text: str | None) -> Any:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _decisions(store: Store, sql_where: str, args: tuple) -> list[dict]:
+    rows = _rows(store, "SELECT id, sim_minute, workflow_id, kind, summary, inputs FROM decisions WHERE "
+                 + sql_where, args)
+    for r in rows:
+        r["inputs"] = _json(r["inputs"])
+    return rows
+
+
+def _config_view(store: Store, wid: str, version: int) -> dict | None:
+    body = store.config_body(wid, version)
+    if body is None:
+        return None
+    return {"prompt_version": body.get("prompt_version"), "allocations": body.get("allocations"),
+            "cohorts": len(body.get("cohorts") or []),
+            "schedule_hours": sorted((body.get("schedule") or {}).get("hour_weights", {}) or {})}
+
+
+def _version_at(store: Store, wid: str, minute: int) -> dict | None:
+    rows = _rows(store, f"SELECT {_VER_COLS} FROM config_versions WHERE workflow_id=? AND ts_minute IS NOT NULL"
+                 " AND ts_minute<=? ORDER BY version DESC LIMIT 1", (wid, minute))
+    if not rows:  # no change observed yet: the initial version
+        rows = _rows(store, f"SELECT {_VER_COLS} FROM config_versions WHERE workflow_id=? ORDER BY version LIMIT 1",
+                     (wid,))
+    return rows[0] if rows else None
+
+
+def _next_version(store: Store, wid: str, version: int) -> dict | None:
+    rows = _rows(store, f"SELECT {_VER_COLS} FROM config_versions WHERE workflow_id=? AND version>?"
+                 " AND ts_minute IS NOT NULL ORDER BY version LIMIT 1", (wid, version))
+    return rows[0] if rows else None
+
+
+def _proposal(store: Store, proposal_id: str | None) -> dict | None:
+    if not proposal_id:
+        return None
+    rows = _rows(store, "SELECT proposal_id, kind, state, route, approval_id, base_version, created_minute,"
+                 " filed_minute, apply_by_minute, expires_minute, applied_version, applied_minute, supersedes,"
+                 " body FROM proposals WHERE proposal_id=?", (proposal_id,))
+    if not rows:
+        return None
+    p = rows[0]
+    body = json.loads(p.pop("body") or "{}")
+    req = body.get("request", {})
+    p.update(summary=body.get("summary"), dims=body.get("dims"), tv=body.get("tv"),
+             impact_score=body.get("impact_score"), affected_leads=body.get("affected_leads"),
+             rationale=req.get("rationale"), dry_run=req.get("dry_run"),
+             superseded_by=[r["proposal_id"] for r in _rows(
+                 store, "SELECT proposal_id FROM proposals WHERE supersedes=?", (proposal_id,))])
+    p["events"] = _rows(store, "SELECT ts_minute, event, approval_id, payload FROM proposal_events"
+                        " WHERE proposal_id=? ORDER BY id", (proposal_id,))
+    for e in p["events"]:
+        e["payload"] = _json(e["payload"])
+    p["approval"] = _approval(p)
+    return p
+
+
+def _approval(p: dict) -> dict | None:
+    """Approval facts. The sim exposes no approver names (A4): the approver is the workflow's policy approver."""
+    if not p.get("approval_id"):
+        return None
+    decided = next((e for e in p["events"] if e["event"] in ("APPROVED", "REJECTED", "EXPIRED")
+                    and isinstance(e["payload"], dict)), None)
+    decided_at = decided["payload"].get("decided_at") if decided else None
+    return {"approval_id": p["approval_id"], "decided_at": decided_at,
+            "decision": decided["event"] if decided else None,
+            "decided_minute": decided["ts_minute"] if decided else None,
+            "approver": f"policy approver of {p['proposal_id'].split(':')[0]}"}
+
+
+def _evidence(store: Store, wid: str, upto: int, since: int) -> list[dict]:
+    """The inputs behind a proposal: the newest row of each evidence kind in (since, upto]."""
+    out: list[dict] = []
+    for kind in _EVIDENCE:
+        rows = _decisions(store, "workflow_id=? AND kind=? AND sim_minute<=? AND sim_minute>? ORDER BY id DESC"
+                          " LIMIT 1", (wid, kind, upto, since))
+        out += rows
+    return sorted(out, key=lambda r: r["id"])
+
+
+def _after(store: Store, wid: str, applied: int | None, until: int | None) -> list[dict]:
+    if applied is None:
+        return []
+    end = until if until is not None else applied + settings.MONITOR_MINUTES
+    ph = ",".join("?" * len(_NOISE))
+    rows = _decisions(store, f"workflow_id=? AND sim_minute>=? AND sim_minute<=? AND kind NOT IN ({ph})"
+                      " AND kind NOT LIKE 'proposal_%' ORDER BY id", (wid, applied, end, *_NOISE))
+    for kind in ("did_eval", "halluc_eval"):
+        rows += _decisions(store, "workflow_id=? AND kind=? AND sim_minute>? AND sim_minute<=? ORDER BY id DESC"
+                           " LIMIT 1", (wid, kind, applied, end))
+    return sorted(rows, key=lambda r: r["id"])
+
+
+def version_basis(store: Store, wid: str, version: int | None) -> dict | None:
+    """Who/why for one config version (shared by every mode)."""
+    if version is None:
+        return None
+    rows = _rows(store, f"SELECT {_VER_COLS} FROM config_versions WHERE workflow_id=? AND version=?",
+                 (wid, version))
+    if not rows:
+        return None
+    ver = rows[0]
+    prop = _proposal(store, ver["proposal_id"])
+    out: dict[str, Any] = {"version": ver, "proposal": prop, "config": _config_view(store, wid, version)}
     if prop:
-        p = prop[0]
-        body = json.loads(p.pop("body") or "{}")
-        p.update(summary=body.get("summary"), dims=body.get("dims"), tv=body.get("tv"),
-                 impact_score=body.get("impact_score"), affected_leads=body.get("affected_leads"),
-                 rationale=body.get("request", {}).get("rationale"))
-        out["proposal"] = p
-        out["lifecycle"] = _rows(store, "SELECT ts_minute, event, payload FROM proposal_events"
-                                 " WHERE proposal_id=? ORDER BY id", (p["proposal_id"],))
-        out["decisions"] = _rows(
-            store, "SELECT sim_minute, kind, summary FROM decisions WHERE"
-            " json_extract(inputs, '$.proposal_id')=? ORDER BY id", (p["proposal_id"],))
-        out["superseded_by"] = _rows(store, "SELECT proposal_id, state FROM proposals WHERE"
-                                     " supersedes=? OR proposal_id=?", (p["proposal_id"], p["supersedes"]))
+        out["decisions"] = _decisions(
+            store, "workflow_id=? AND json_extract(inputs, '$.proposal_id')=? AND kind NOT IN"
+            " ('proposal_draft','proposal_intent','proposal_monitoring','proposal_closed') ORDER BY id",
+            (wid, prop["proposal_id"]))
     else:
-        out["decisions"] = _rows(
-            store, "SELECT sim_minute, kind, summary FROM decisions WHERE workflow_id=? AND"
-            " kind='config_observed' AND summary LIKE ? ORDER BY id", (workflow, f"v{ver['version']} %"))
+        out["decisions"] = _decisions(store, "workflow_id=? AND kind='config_observed' AND summary LIKE ?"
+                                      " ORDER BY id", (wid, f"v{version} %"))
     return out
 
 
-def render(report: dict[str, Any]) -> str:
-    lines = [f"why {report['workflow']} at {report['at']}"]
-    v = report["version"]
-    if v is None:
-        return "\n".join(lines + ["  no config version recorded"])
-    lines.append(f"  active version v{v['version']} by {v['actor'] or 'initial'}"
-                 f" (observed {fmt_minute(v['ts_minute'])}, dims {v['changed_dims']})")
-    p = report["proposal"]
-    if p:
-        lines.append(f"  proposal {p['proposal_id']} [{p['route']}] state={p['state']}"
-                     f" approval={p['approval_id']} base=v{p['base_version']}")
-        lines.append(f"    summary: {p['summary']}")
-        lines.append(f"    rationale: {p['rationale']}")
-        lines.append(f"    impact={p['impact_score']} affected_leads={p['affected_leads']} tv={p['tv']}")
-        lines.append("  lifecycle:")
-        lines += [f"    {fmt_minute(t)} {e} {pl}" for t, e, pl in
-                  [(r["ts_minute"], r["event"], r["payload"]) for r in report["lifecycle"]]]
-    elif v["proposal_id"] is None and v["actor"] == "supervisor":
-        lines.append("  made by the client's supervisor (bypasses governance; never silently overwritten)")
-    lines.append("  decisions:")
-    lines += [f"    {fmt_minute(d['sim_minute'])} {d['kind']}: {d['summary']}" for d in report["decisions"]]
-    for other in report["superseded_by"]:
-        lines.append(f"  related: {other['proposal_id']} ({other['state']})")
-    return "\n".join(lines)
+def why_at(store: Store, workflow: str, at_minute: int) -> dict[str, Any]:
+    out: dict[str, Any] = {"mode": "at", "workflow": workflow, "at": fmt_minute(at_minute), "at_minute": at_minute,
+                           "version": None, "config": None, "proposal": None, "evidence": [],
+                           "decisions": [], "monitoring": [], "superseded_by": None}
+    ver = _version_at(store, workflow, at_minute)
+    if ver is None:
+        return out
+    basis = version_basis(store, workflow, ver["version"]) or {}
+    prop = basis.get("proposal")
+    nxt = _next_version(store, workflow, ver["version"])
+    out.update(version=ver, config=basis.get("config"), proposal=prop, decisions=basis.get("decisions", []),
+               superseded_by=_describe_next(store, nxt))
+    if prop:
+        since = (prop["created_minute"] or 0) - settings.MINUTES_PER_DAY
+        out["evidence"] = _evidence(store, workflow, prop["created_minute"] or at_minute, since)
+        out["monitoring"] = _after(store, workflow, prop["applied_minute"],
+                                   nxt["ts_minute"] if nxt else None)
+    return out
+
+
+def _describe_next(store: Store, nxt: dict | None) -> dict | None:
+    if nxt is None:
+        return None
+    prop = _proposal(store, nxt["proposal_id"])
+    return {"version": nxt, "proposal_summary": prop["summary"] if prop else None,
+            "proposal_state": prop["state"] if prop else None}
+
+
+def _in_range_filter() -> str:
+    ph = ",".join("?" * len(_NOISE + _LIFECYCLE_SKIP))
+    return f"kind NOT IN ({ph})"
+
+
+def why_range(store: Store, workflow: str, start: int, end: int) -> dict[str, Any]:
+    skip = _NOISE + _LIFECYCLE_SKIP
+    decisions = _decisions(store, f"workflow_id=? AND sim_minute>=? AND sim_minute<? AND {_in_range_filter()}"
+                           " ORDER BY id", (workflow, start, end, *skip))
+    alerts = _rows(store, "SELECT sim_minute, severity, code, message FROM alerts WHERE workflow_id=? AND"
+                   " sim_minute>=? AND sim_minute<? ORDER BY id", (workflow, start, end))
+    events = [{"minute": d["sim_minute"], "type": d["kind"], "text": d["summary"], "inputs": d["inputs"]}
+              for d in decisions]
+    events += [{"minute": a["sim_minute"], "type": f"alert:{a['code']}", "text": a["message"], "inputs": None}
+               for a in alerts]
+    events.sort(key=lambda e: (e["minute"] if e["minute"] is not None else -1))
+    return {"mode": "range", "workflow": workflow, "from": fmt_minute(start), "to": fmt_minute(end),
+            "events": events}
+
+
+def _prompt_of(store: Store, wid: str, minute: int) -> dict | None:
+    ver = _version_at(store, wid, minute)
+    return version_basis(store, wid, ver["version"]) if ver else None
+
+
+def why_lead(store: Store, lead_id: str, day: int | None = None) -> dict[str, Any]:
+    leads = _rows(store, "SELECT lid, lead_id, person_id, workflow_id, cell, campaign_id, ts_minute FROM leads"
+                  " WHERE lead_id=?", (lead_id,))
+    out: dict[str, Any] = {"mode": "lead", "lead_id": lead_id, "day": day, "lead": None, "calls": [],
+                           "versions": {}}
+    if not leads:
+        return out
+    lead = leads[0]
+    out["lead"] = lead
+    wid = lead["workflow_id"]
+    sql = ("SELECT event_id, ts_minute, day, hour, attempt_no, config_version, cohort_id, welcome, voice,"
+           " caller_id, prompt, connected, engaged FROM calls WHERE lid=?")
+    args: tuple = (lead["lid"],)
+    if day is not None:
+        sql, args = sql + " AND day=?", args + (day,)
+    out["calls"] = _rows(store, sql + " ORDER BY ts_minute, event_id", args)
+    for call in out["calls"]:
+        active = _version_at(store, wid, call["ts_minute"])
+        call["prompt_active_version"] = active["version"] if active else None
+        for key in (call["config_version"], call["prompt_active_version"]):
+            if key is not None and key not in out["versions"]:
+                out["versions"][key] = version_basis(store, wid, key)
+    return out

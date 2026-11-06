@@ -24,12 +24,12 @@ def test_why_reports_version_proposal_lifecycle_and_decisions(client, store, wor
     assert run_until(ctl, lambda: any(s in (pr.APPLIED, pr.MONITORING) for s in proposal_states(store).values()))
     ctl.tick()
     ctl.tick()
-    rep = audit.why(store, "nw_renewal", 1 * 1440)
+    rep = audit.why_at(store, "nw_renewal", 1 * 1440)
     assert rep["version"]["version"] == 2 and rep["proposal"]["proposal_id"] == "nw_renewal:1:daily_bundle"
     assert rep["proposal"]["rationale"] and rep["proposal"]["approval_id"]
-    assert [e["event"] for e in rep["lifecycle"]][:3] == ["DRAFT", "INTENT", "PENDING"]
     assert any(d["kind"] == "proposal_applied" for d in rep["decisions"])
-    before = audit.why(store, "nw_renewal", 60)  # before the change was observed: the initial version
+    assert [e["event"] for e in rep["proposal"]["events"]][:3] == ["DRAFT", "INTENT", "PENDING"]
+    before = audit.why_at(store, "nw_renewal", 60)  # before the change was observed: the initial version
     assert before["version"]["version"] == 1 and before["proposal"] is None
     store.close()
     assert cli_main(["why", "--state-dir", str(store.path.parent), "--workflow", "nw_renewal",
