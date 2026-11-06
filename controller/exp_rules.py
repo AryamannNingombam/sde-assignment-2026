@@ -4,8 +4,8 @@ One *scope* is one population analysed on its own (the whole workflow, or a pre-
 scope the rule has four parts:
 
 * harm check (every 4 h):  z <= -3 with >= 150 connects        -> remove now; z <= -2.5 folds into the daily look;
-* ramp / drop (daily):      point >= control after >=1 day and >=100 connects -> ramp;  z <= -1 (cumulative, or the
-                            recent window) -> drop;
+* ramp / drop (daily):      point >= control after >=1 day and >=100 connects -> ramp;  whole-experiment z <= -1.5
+                            (<300 connects) or <= -1 (>=300 connects) -> drop, otherwise defer;
 * winner (daily, <= 4 looks): one-sided z against control past a Lan-DeMets O'Brien-Fleming boundary at the arm's own
                             information fraction, Holm across the dim's arms, AND point lift >= 3%, AND recent-window
                             lift lower bound > 0, AND pickup non-inferiority within ``max_drop``.
@@ -28,9 +28,25 @@ class ArmData:
     engaged: es.Rows  # {lid: (connects, engaged)} since the experiment started
     recent: es.Rows  # same, last EXP_RECENT_MINUTES only
     pickup: es.Rows  # {lid: (dials, connects)} since the experiment started
+    engaged_s: Mapping[str, es.Rows] | None = None  # the same split by stratum (share regime x day), when known
+    recent_s: Mapping[str, es.Rows] | None = None
 
 
 EMPTY = ArmData({}, {}, {})
+
+
+def pair_contrast(d: ArmData, ctl: ArmData, recent: bool = False) -> es.Contrast | None:
+    """Arm vs control: Mantel-Haenszel pooled over strata when both sides carry them, else the plain contrast."""
+    a_s, c_s = (d.recent_s, ctl.recent_s) if recent else (d.engaged_s, ctl.engaged_s)
+    if a_s is not None and c_s is not None:
+        keys = sorted(set(a_s) | set(c_s))
+        return es.contrast_strata([(a_s.get(k, {}), c_s.get(k, {})) for k in keys])
+    return es.contrast(d.recent, ctl.recent) if recent else es.contrast(d.engaged, ctl.engaged)
+
+
+def drop_threshold(n_arm: float) -> float:
+    """Whole-experiment drop bound: a stricter z below EXP_DROP_BIG_N connects (a 7.5% arm costs <= 0.075 |effect|)."""
+    return settings.EXP_DROP_Z if n_arm >= settings.EXP_DROP_BIG_N else settings.EXP_DROP_Z_SMALL
 
 
 def design_information() -> float:
@@ -46,8 +62,8 @@ def summarise(data: Mapping[str, ArmData], control: str, arms: Sequence[str]) ->
     out: dict[str, dict] = {}
     for arm in arms:
         d = data.get(arm, EMPTY)
-        c = es.contrast(d.engaged, ctl.engaged)
-        r = es.contrast(d.recent, ctl.recent)
+        c = pair_contrast(d, ctl)
+        r = pair_contrast(d, ctl, recent=True)
         rec = {"n_arm": es.totals(d.engaged)[0], "n_ctrl": es.totals(ctl.engaged)[0], "ok": c is not None}
         if c is not None:
             rec.update(rate_arm=c.rate_a, rate_ctrl=c.rate_c, lift=c.lift, z=c.z, se=c.se, info=c.info,
@@ -105,9 +121,7 @@ def daily_look(data: Mapping[str, ArmData], control: str, active: Sequence[str],
         if not s["ok"]:
             continue
         enough = exposure_days >= settings.EXP_RAMP_MIN_DAYS and s["n_arm"] >= settings.EXP_RAMP_MIN_CONNECTS
-        recent_bad = (s["recent_n"] >= settings.EXP_RAMP_MIN_CONNECTS and "recent_z" in s
-                      and s["recent_z"] <= settings.EXP_DROP_Z)
-        if enough and (s["z"] <= settings.EXP_DROP_Z or recent_bad):
+        if enough and s["z"] <= drop_threshold(s["n_arm"]):
             out.drop.append(arm)
         elif enough and s["lift"] >= 0 and arm not in ramped:
             out.ramp.append(arm)

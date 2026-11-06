@@ -103,3 +103,31 @@ def test_same_data_same_decision():
 
 def test_design_information_matches_the_power_formula():
     assert er.design_information() == pytest.approx(680, rel=0.01)
+
+
+def test_drop_threshold_is_stricter_below_300_connects():
+    assert er.drop_threshold(299) == -1.5 and er.drop_threshold(300) == -1.0
+
+
+def test_drop_decides_on_the_whole_experiment_not_the_recent_window():
+    # recent window terrible, whole experiment fine: no drop (the winner-side recent check covers promotion)
+    data = {"C": arm_data(0.5, 900, seed=1, offset=10_000), "A": arm_data(0.5, 900, recent_rate=0.2, seed=2)}
+    assert look(data).drop == []
+
+
+def test_drop_waits_for_z_minus_1_5_when_the_arm_is_small():
+    ctl = {i: (1.0, float(i % 2)) for i in range(150)}
+    arm = {1000 + i: (1.0, float(i % 3 == 0)) for i in range(150)}  # n = 150 < 300
+    out = look({"C": er.ArmData(ctl, ctl, {}), "A": er.ArmData(arm, arm, {})}, ramped=[])
+    z = out.records["A"]["z"]
+    assert (z <= -1.5) == ("A" in out.drop) and z < -1.0
+
+
+def test_stratified_contrast_is_used_when_both_arms_carry_strata():
+    a1, c1 = {1: (50.0, 40.0)}, {2: (50.0, 20.0)}
+    a2, c2 = {3: (50.0, 10.0)}, {4: (200.0, 100.0)}
+    d_a = er.ArmData({**a1, **a2}, {}, {}, {"d1": a1, "d2": a2}, {})
+    d_c = er.ArmData({**c1, **c2}, {}, {}, {"d1": c1, "d2": c2}, {})
+    plain = es.contrast(d_a.engaged, d_c.engaged)
+    pooled = er.pair_contrast(d_a, d_c)
+    assert pooled.effect != pytest.approx(plain.effect) and pooled.n_a == 100 and pooled.n_c == 250

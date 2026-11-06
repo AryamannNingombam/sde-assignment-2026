@@ -40,5 +40,7 @@ def weights(control: str, shares: Mapping[str, float]) -> dict[str, float]:
     return {control: round(1.0 - sum(live.values()), 6), **{a: round(s, 6) for a, s in live.items()}}
 
 
-def promotion_weights(winner: str, old_control: str) -> dict[str, float]:
-    return {winner: round(1.0 - settings.EXP_HOLDOUT, 6), old_control: round(settings.EXP_HOLDOUT, 6)}
+def promotion_weights(winner: str, old_control: str, stage: int = 2) -> dict[str, float]:
+    """Stage 1: winner at EXP_STAGE1_SHARE against the old control; stage 2: winner 90% / holdout 10%."""
+    share = settings.EXP_STAGE1_SHARE if stage == 1 else 1.0 - settings.EXP_HOLDOUT
+    return {winner: round(share, 6), old_control: round(1.0 - share, 6)}

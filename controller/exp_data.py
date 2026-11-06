@@ -30,20 +30,47 @@ def _group(store: Store, sql: str, args: list) -> dict[str, dict[int, tuple[floa
     return out
 
 
+_STRATUM = ("(day*1000 + (SELECT COUNT(*) FROM config_versions cv WHERE cv.workflow_id=calls.workflow_id"
+            " AND cv.ts_minute<=calls.ts_minute))")
+
+
+def _group_strata(store: Store, sql: str, args: list) -> dict[str, dict[str, dict[int, tuple[float, float]]]]:
+    out: dict[str, dict[str, dict[int, tuple[float, float]]]] = {}
+    for arm, stratum, lid, n, x in store.conn.execute(sql, args):
+        out.setdefault(arm, {}).setdefault(str(stratum), {})[lid] = (float(n), float(x))
+    return out
+
+
+def _flatten(strata: dict[str, dict[int, tuple[float, float]]]) -> dict[int, tuple[float, float]]:
+    out: dict[int, tuple[float, float]] = {}
+    for rows in strata.values():
+        for lid, (n, x) in rows.items():
+            a = out.get(lid, (0.0, 0.0))
+            out[lid] = (a[0] + n, a[1] + x)
+    return out
+
+
 def load_arms(store: Store, wid: str, dim: str, start_minute: int, now: int,
               cells: Sequence[int] | None = None) -> dict[str, ArmData]:
-    """Arm data for calls at or after ``start_minute`` (``recent`` = the last EXP_RECENT_MINUTES)."""
+    """Arm data for calls at or after ``start_minute`` (``recent`` = the last EXP_RECENT_MINUTES).
+
+    Engagement is also returned per stratum (day x number of config versions live at the call = share regime),
+    so contrasts can be Mantel-Haenszel pooled.
+    """
     col = column(dim)
     cf, cargs = _cell_filter(cells)
     base = f" FROM calls WHERE workflow_id=? AND day>=? AND ts_minute>=?{cf}"
     lead = [wid, start_minute // DAY, start_minute, *cargs]
-    eng = _group(store, f"SELECT {col}, lid, COUNT(*), SUM(engaged){base} AND connected=1 GROUP BY {col}, lid", lead)
+    eng_s = _group_strata(store, f"SELECT {col}, {_STRATUM}, lid, COUNT(*), SUM(engaged){base} AND connected=1"
+                                 f" GROUP BY {col}, {_STRATUM}, lid", lead)
     pick = _group(store, f"SELECT {col}, lid, COUNT(*), SUM(connected){base} GROUP BY {col}, lid", lead)
     recent_from = max(start_minute, now - settings.EXP_RECENT_MINUTES)
-    rec = _group(store, f"SELECT {col}, lid, COUNT(*), SUM(engaged) FROM calls WHERE workflow_id=? AND day>=?"
-                        f" AND ts_minute>=?{cf} AND connected=1 GROUP BY {col}, lid",
-                 [wid, recent_from // DAY, recent_from, *cargs])
-    return {arm: ArmData(eng.get(arm, {}), rec.get(arm, {}), pick.get(arm, {})) for arm in set(eng) | set(pick) | set(rec)}
+    rec_s = _group_strata(store, f"SELECT {col}, {_STRATUM}, lid, COUNT(*), SUM(engaged) FROM calls WHERE workflow_id=?"
+                                 f" AND day>=? AND ts_minute>=?{cf} AND connected=1 GROUP BY {col}, {_STRATUM}, lid",
+                          [wid, recent_from // DAY, recent_from, *cargs])
+    return {arm: ArmData(_flatten(eng_s.get(arm, {})), _flatten(rec_s.get(arm, {})), pick.get(arm, {}),
+                         eng_s.get(arm, {}), rec_s.get(arm, {}))
+            for arm in set(eng_s) | set(pick) | set(rec_s)}
 
 
 def first_exposure_minute(store: Store, wid: str, dim: str, options: Sequence[str], since: int = 0) -> int | None:

@@ -175,7 +175,9 @@ EXP_RAMP_SHARE = 0.20  # a challenger whose point estimate is >= control ramps t
 EXP_MIN_CONTROL_SHARE = 0.40  # control never drops below 40% during the experiment
 EXP_RAMP_MIN_DAYS = 1.0  # ramp/drop decisions need >= 1 day of exposure ...
 EXP_RAMP_MIN_CONNECTS = 100  # ... and >= 100 connects on the arm
-EXP_DROP_Z = -1.0  # a challenger at z <= -1 is dropped in the next daily bundle
+EXP_DROP_Z = -1.0  # a challenger at whole-experiment z <= -1 (>= EXP_DROP_BIG_N connects) is dropped in the next daily bundle
+EXP_DROP_Z_SMALL = -1.5  # ... but below EXP_DROP_BIG_N connects only z <= -1.5 drops; otherwise defer
+EXP_DROP_BIG_N = 300
 EXP_HARM_Z = -3.0  # harm-stop (every 4 h): z <= -3 with >= EXP_HARM_MIN_CONNECTS connects
 EXP_HARM_MIN_CONNECTS = 150
 EXP_HARM_CHECK_MINUTES = 240
@@ -205,3 +207,12 @@ EXP_CUSUM_SHRINK_N = 20  # pseudo-connects pulling an (hour, cell) reference rat
 EXP_ROLLBACK_Z = -1.96  # winner significantly worse than the holdout
 EXP_ROLLBACK_HOLDOUT_MIN = 60  # holdout connects needed for the significance route
 EXP_HOLDOUT_WINDOW_MINUTES = 1440
+
+# --- two-stage promotion, sequential decay alarm, apply-time veto (docs/THRESHOLDS.md) ----------------------
+EXP_STAGE1_SHARE = 0.5  # stage 1: winner 50% / old control 50%
+EXP_STAGE1_MIN_MINUTES = 1440  # stage 2 only after >= 24 h at stage 1
+EXP_VETO_Z = 0.84  # apply-time: recent-window one-sided 80% lower bound of the lift must be > 0
+EXP_DECAY_ALPHA = 0.10  # one-sided level of the sequential winner-vs-control rollback test per monitoring epoch
+EXP_DECAY_DESIGN_LIFT = 0.15  # an epoch ends when its information would give 80% power at a -15% lift
+EXP_DECAY_MIN_CONNECTS = 60  # control connects needed before the sequential test can alarm
+EXP_REVERT_MAX_EXPECTED_DROP = 0.0  # an end-of-experiment revert must not be expected-harmful on observed arm rates
