@@ -180,6 +180,7 @@ EXP_RAMP_MIN_CONNECTS = 100  # ... and >= 100 connects on the arm
 EXP_DROP_Z = -1.0  # a challenger at whole-experiment z <= -1 (>= EXP_DROP_BIG_N connects) is dropped in the next daily bundle
 EXP_DROP_Z_SMALL = -1.5  # ... but below EXP_DROP_BIG_N connects only z <= -1.5 drops; otherwise defer
 EXP_DROP_BIG_N = 300
+EXP_RAMPED_DROP_RECENT_Z = -1.5  # an arm already ramped to 20% is also dropped when its last-24h z <= this (decay check)
 EXP_HARM_Z = -3.0  # harm-stop (every 4 h): z <= -3 with >= EXP_HARM_MIN_CONNECTS connects
 EXP_HARM_MIN_CONNECTS = 150
 EXP_HARM_CHECK_MINUTES = 240

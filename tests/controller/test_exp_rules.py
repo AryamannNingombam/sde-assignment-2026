@@ -147,3 +147,18 @@ def test_revert_expected_change_is_positive_for_a_worse_arm_and_negative_for_a_b
     # a stale point estimate that contradicts the rates never reverts
     summ = {"B": {"ok": True, "lift": -0.01, "rate_arm": 0.55, "rate_ctrl": 0.5}}
     assert er.end_of_experiment_reverts(summ, {"B": 0.2}, "X") == []
+
+
+def test_an_already_ramped_arm_is_dropped_on_a_bad_last_24h_but_an_entry_arm_is_not():
+    data = {"C": arm_data(0.5, 900, seed=1, offset=10_000), "A": arm_data(0.5, 900, recent_rate=0.35, seed=2)}
+    assert look(data, ramped=["A"]).drop == ["A"]
+    assert look(data, ramped=[]).drop == []
+
+
+def test_drop_predicate_is_shared_with_the_apply_time_veto():
+    ok = {"ok": True, "z": -2.0, "n_arm": 500, "recent_n": 200, "recent_z": 0.0}
+    assert er.drop_holds(ok, False) and not er.drop_vetoed(ok)
+    recovered = {"ok": True, "z": 0.3, "n_arm": 500, "recent_n": 200, "recent_z": 0.5}
+    assert er.drop_vetoed(recovered)
+    decaying = {"ok": True, "z": 0.3, "n_arm": 500, "recent_n": 200, "recent_z": -1.8}
+    assert er.drop_holds(decaying, True) and not er.drop_vetoed(decaying, True) and er.drop_vetoed(decaying, False)

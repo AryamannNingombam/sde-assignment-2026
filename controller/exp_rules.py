@@ -5,7 +5,8 @@ scope the rule has four parts:
 
 * harm check (every 4 h):  z <= -3 with >= 150 connects        -> remove now; z <= -2.5 folds into the daily look;
 * ramp / drop (daily):      point >= control after >=1 day and >=100 connects -> ramp;  whole-experiment z <= -1.5
-                            (<300 connects) or <= -1 (>=300 connects) -> drop, otherwise defer;
+                            (<300 connects) or <= -1 (>=300 connects) -> drop, otherwise defer; an arm already ramped
+                            is also dropped at last-24h z <= -1.5 (in-experiment decay check);
 * winner (daily, <= 4 looks): one-sided z against control past a Lan-DeMets O'Brien-Fleming boundary at the arm's own
                             information fraction, Holm across the dim's arms, AND point lift >= 3%, AND recent-window
                             lift lower bound > 0, AND pickup non-inferiority within ``max_drop``.
@@ -42,6 +43,17 @@ def pair_contrast(d: ArmData, ctl: ArmData, recent: bool = False) -> es.Contrast
         keys = sorted(set(a_s) | set(c_s))
         return es.contrast_strata([(a_s.get(k, {}), c_s.get(k, {})) for k in keys])
     return es.contrast(d.recent, ctl.recent) if recent else es.contrast(d.engaged, ctl.engaged)
+
+
+def drop_holds(s: Mapping, is_ramped: bool) -> bool:
+    """Drop predicate of the decision look: whole-experiment z at the drop bound; an arm already carrying the ramp
+    share (20%: keeping it costs ~3x a 7.5% entry arm) is also dropped when its last-24h z is <= EXP_RAMPED_DROP_RECENT_Z
+    (the in-experiment decay check)."""
+    if not s.get("ok"):
+        return False
+    recent_bad = (is_ramped and s["recent_n"] >= settings.EXP_RAMP_MIN_CONNECTS
+                  and s.get("recent_z", 0.0) <= settings.EXP_RAMPED_DROP_RECENT_Z)
+    return s["z"] <= drop_threshold(s["n_arm"]) or recent_bad
 
 
 def drop_threshold(n_arm: float) -> float:
@@ -97,6 +109,19 @@ def pickup_guard(data: Mapping[str, ArmData], control: str, arm: str, max_drop: 
                                     "drop_upper": upper_drop, "margin": max_drop, "dials_arm": c.n_a}
 
 
+def ramp_vetoed(s: Mapping) -> bool:
+    """Apply-time predicate for a ramp: cumulative z at the drop bound, or a bad recent window."""
+    if not s.get("ok"):
+        return False
+    recent_bad = s["recent_n"] >= settings.EXP_RAMP_MIN_CONNECTS and s.get("recent_z", 0.0) <= settings.EXP_DROP_Z
+    return s["z"] <= drop_threshold(s["n_arm"]) or recent_bad
+
+
+def drop_vetoed(s: Mapping, is_ramped: bool = False) -> bool:
+    """Apply-time predicate for a drop: the same predicate no longer holds (the arm recovered)."""
+    return bool(s.get("ok")) and not drop_holds(s, is_ramped)
+
+
 def revert_expected_change(shares: Mapping[str, float], rates: Mapping[str, float], control: str, arm: str) -> float:
     """Expected relative engagement change of moving ``arm``'s share back to control, on OBSERVED arm rates."""
     before = sum(s * rates.get(a, rates[control]) for a, s in shares.items()) + (1.0 - sum(shares.values())) * rates[control]
@@ -143,7 +168,7 @@ def daily_look(data: Mapping[str, ArmData], control: str, active: Sequence[str],
         if not s["ok"]:
             continue
         enough = exposure_days >= settings.EXP_RAMP_MIN_DAYS and s["n_arm"] >= settings.EXP_RAMP_MIN_CONNECTS
-        if enough and s["z"] <= drop_threshold(s["n_arm"]):
+        if enough and drop_holds(s, arm in ramped):
             out.drop.append(arm)
         elif enough and s["lift"] >= 0 and arm not in ramped:
             out.ramp.append(arm)

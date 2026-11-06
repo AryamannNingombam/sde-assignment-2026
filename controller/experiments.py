@@ -446,16 +446,11 @@ def _veto_update(ctx, st, wid, dim, d) -> str | None:
     rows = er.summarise(data, st["control"], list(ramp) + list(drop))
     bad = []
     for a in ramp:
-        s = rows[a]
-        if not s["ok"]:
-            continue
-        recent_bad = (s["recent_n"] >= settings.EXP_RAMP_MIN_CONNECTS and s.get("recent_z", 0.0) <= settings.EXP_DROP_Z)
-        if s["z"] <= er.drop_threshold(s["n_arm"]) or recent_bad:
-            bad.append(f"ramp {a} (z {s['z']:.2f}, recent z {s.get('recent_z', float('nan')):.2f})")
+        if er.ramp_vetoed(rows[a]):
+            bad.append(f"ramp {a} (z {rows[a]['z']:.2f}, recent z {rows[a].get('recent_z', float('nan')):.2f})")
     for a in drop:
-        s = rows[a]
-        if s["ok"] and s["z"] > er.drop_threshold(s["n_arm"]):
-            bad.append(f"drop {a} (z {s['z']:.2f} is back above {er.drop_threshold(s['n_arm'])})")
+        if er.drop_vetoed(rows[a], a in st["ramped"]):
+            bad.append(f"drop {a} (z {rows[a]['z']:.2f}, recent z {rows[a].get('recent_z', float('nan')):.2f}: no longer at the drop bound)")
     return f"{dim}: apply-time re-check of the look failed: " + "; ".join(bad) if bad else None
 
 
