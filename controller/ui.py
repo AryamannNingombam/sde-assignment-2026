@@ -150,7 +150,8 @@ def _kpis(d: dict) -> str:
 def workflow_html(d: dict) -> str:
     person = ""
     if d.get("person"):
-        person = f"<h2>Per-person call-time analysis</h2>{_card(e(str(d['person']['rows'])) + ' rows in ' + e(d['person']['table']))}"
+        person = "<h2>Per-person call time (analysis only)</h2>" + _card(
+            "<pre>" + e("\n".join(text_view.person_lines(d["person"]))) + "</pre>")
     return (f"<p class='mut'>as of {e(d['now_text'])}</p><h2>What's being tested</h2>{_tested(d)}<h2>What's winning</h2>{_winning(d)}"
             f"<h2>What we need from you</h2>{_needs(d)}<h2>What changed today</h2>{_changed(d)}"
             f"<h2>Open incidents &amp; alerts</h2>{_alerts(d)}<h2>KPIs</h2>{_kpis(d)}{person}")

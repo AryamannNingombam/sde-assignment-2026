@@ -286,15 +286,15 @@ def kpis(store: Store, wid: str, now: int) -> dict:
                            "connects_today": today.connects, "connects_trailing": prior.connects}}
 
 
-def person_analysis(store: Store) -> dict | None:
-    """Placeholder until Phase 9: shown only if a ``person_*`` table exists and has rows."""
-    tables = [r["name"] for r in rows(store, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'person\\_%' ESCAPE '\\'")
-              if r["name"] != "person_id"]
-    for t in tables:
-        n = rows(store, f"SELECT COUNT(*) AS n FROM {t}")
-        if n and n[0]["n"]:
-            return {"table": t, "rows": n[0]["n"], "sample": rows(store, f"SELECT * FROM {t} LIMIT 5")}
-    return None
+def person_analysis(store: Store, wid: str) -> dict | None:
+    """Latest per-person call-time analysis of this workflow (C4b, analysis only), from its audit decision row."""
+    r = rows(store, "SELECT sim_minute, inputs FROM decisions WHERE kind='person_analysis' AND workflow_id=? "
+                    "ORDER BY id DESC LIMIT 1", (wid,))
+    inputs = _json(r[0]["inputs"]) if r else None
+    if not inputs:
+        return None
+    n = rows(store, "SELECT COUNT(*) AS n FROM person_analysis WHERE workflow_id=?", (wid,))
+    return {**inputs, "minute": r[0]["sim_minute"], "table": "person_analysis", "rows": n[0]["n"] if n else 0}
 
 
 # ------------------------------------------------------------------ assembly
@@ -313,4 +313,4 @@ def build(store: Store, wid: str, now: int | None = None) -> dict:
     return {"workflow": wid, "now": now, "now_text": fmt_minute(now), "experiments": experiments(store, wid, now),
             "did_probes": did_probes(store, wid), "winners": winners(store, wid), "approvals": approvals(store, wid),
             "changes": changes_today(store, wid, now), "incidents": open_incidents(store, wid),
-            "alerts": alerts(store, wid, now), "kpis": kpis(store, wid, now), "person": person_analysis(store)}
+            "alerts": alerts(store, wid, now), "kpis": kpis(store, wid, now), "person": person_analysis(store, wid)}

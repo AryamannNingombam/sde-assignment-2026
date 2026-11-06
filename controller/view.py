@@ -37,6 +37,19 @@ def _experiment_lines(e: dict) -> list[str]:
     return lines
 
 
+def person_lines(p: dict) -> list[str]:
+    return [f"Per-person call time (analysis only) - as of {fmt_minute(p['minute'])}, never pushed to config",
+            f"  eligible persons {p['eligible']}, would qualify {p['qualifying']} "
+            f"({p['qualifying_data_driven']} from person data, {p['qualifying_on_prior_alone']} on the cohort prior alone)",
+            f"  data weight {pct(p['mean_data_weight'])}: the posterior is mostly the cohort prior (prior = {p['prior_strength']:g} dials per block)",
+            f"  expected pickup lift if deployed, ignoring capacity: {signed(p['expected_lift_ignoring_capacity'])} per qualifying person "
+            f"(cohort prior {signed(p['lift_from_cohort_prior'])}, person data {signed(p['lift_from_person_data'])}); "
+            f"workflow upper bound {signed(p['workflow_lift_upper_bound'])}",
+            f"  null check: with no person effect the same rule qualifies {p['null_qualifying']} persons "
+            f"(lift {signed(p['null_expected_lift'])}) - compare with {p['qualifying']}",
+            f"  {p['note']}"]
+
+
 def render(d: dict) -> str:
     out = [f"=== {d['workflow']}  as of {d['now_text']} ===", "", "WHAT'S BEING TESTED"]
     exps = [e for e in d["experiments"] if e["phase"] in ("pending", "running")]
@@ -89,7 +102,7 @@ def render(d: dict) -> str:
             f"  pickup      {pct(k['pickup']['today'])} vs {pct(k['pickup']['trailing'])}   (dials {k['pickup']['dials_today']} vs {k['pickup']['dials_trailing']})",
             f"  engagement  {pct(k['engagement']['today'])} vs {pct(k['engagement']['trailing'])}   (connects {k['engagement']['connects_today']} vs {k['engagement']['connects_trailing']})"]
     if d.get("person"):
-        out += ["", f"PER-PERSON CALL-TIME ANALYSIS ({d['person']['rows']} rows in {d['person']['table']})"]
+        out += ["", *person_lines(d["person"])]
     return "\n".join(out)
 
 

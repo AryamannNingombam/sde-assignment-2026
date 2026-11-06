@@ -155,6 +155,21 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return ui.serve(db, args.port, args.host)
 
 
+def cmd_person_analysis(args: argparse.Namespace) -> int:
+    from . import person_analysis, view_data
+    db = _resolve_db(args)
+    if db is None or not db.exists():
+        print(f"no state database found ({db or args.state_dir})")
+        return 1
+    store = view_data.open_readonly(db) if args.no_persist else Store(db)
+    try:
+        report = person_analysis.run(store, view_data.now_minute(store), persist=not args.no_persist)
+    finally:
+        store.close()
+    print(json.dumps(report, indent=2) if args.json else person_analysis.render(report))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="controller")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -190,12 +205,17 @@ def main(argv: list[str] | None = None) -> int:
     why.add_argument("--lead", help="lead id: that customer's calls and the decisions behind them")
     why.add_argument("--day", type=int, default=None, help="with --lead: only calls on this day")
     why.add_argument("--json", action="store_true")
+    pa = sub.add_parser("person-analysis", help="per-person call-time analysis of a store (analysis only, never config)")
+    pa.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    pa.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
+    pa.add_argument("--no-persist", action="store_true", help="read-only: write no person_analysis rows or decision")
+    pa.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     return {"run": cmd_run, "status": cmd_status, "why": cmd_why, "view": cmd_view,
-            "ui": cmd_ui}[args.cmd](args)
+            "ui": cmd_ui, "person-analysis": cmd_person_analysis}[args.cmd](args)
 
 
 if __name__ == "__main__":

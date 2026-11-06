@@ -219,3 +219,11 @@ EXP_DECAY_ALPHA = 0.10  # one-sided level of the sequential winner-vs-control ro
 EXP_DECAY_DESIGN_LIFT = 0.15  # an epoch ends when its information would give 80% power at a -15% lift
 EXP_DECAY_MIN_CONNECTS = 60  # control connects needed before the sequential test can alarm
 EXP_REVERT_MAX_EXPECTED_DROP = 0.0  # an end-of-experiment revert must not be expected-harmful on observed arm rates
+
+# --- C4b per-person call-time analysis (ANALYSIS ONLY: nothing here ever reaches a config) ---
+PERSON_MIN_CAMPAIGNS = 2  # "returning" person: seen in >= 2 campaigns of the workflow
+PERSON_MIN_DIALS = 4  # a person needs this many dials ...
+PERSON_MIN_BLOCKS = 2  # ... spread over at least this many hour blocks
+PERSON_PRIOR_STRENGTH = 20.0  # PRIOR (documented in docs/THRESHOLDS.md): pseudo-dials of the cohort block profile
+PERSON_PASS_PROB = 0.8  # would-assign only if P(best block pickup > cohort average) >= this
+PERSON_MAX_ROWS_PER_WORKFLOW = 50_000  # cap on persisted per-person rows (bounded table)
