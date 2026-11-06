@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# Replace this with your controller. Contract: ./run.sh <SIM_URL> runs until the scenario finishes.
 set -euo pipefail
-SIM_URL="${1:?usage: ./run.sh <SIM_URL>}"
-echo "No controller yet — running the naive example against $SIM_URL" >&2
-exec python examples/naive_controller.py --url "$SIM_URL"
+
+cd "$(dirname "$0")"
+
+if [ ! -d ".venv" ]; then
+  python3 -m venv .venv
+fi
+# shellcheck disable=SC1091
+source .venv/bin/activate
+
+pip install --quiet --upgrade pip
+pip install --quiet -r requirements.txt
+
+exec python main.py "$@"
