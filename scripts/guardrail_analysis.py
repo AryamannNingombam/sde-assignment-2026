@@ -80,6 +80,27 @@ def summarise(calls):
     return out
 
 
+def decompose(m: dict, b: dict) -> dict:
+    """engaged/connected = f1*E1 + (1-f1)*Erep; split the change into three parts (+ binomial SE of the total)."""
+    def parts(x):
+        o = x["ordinal"]
+        n_first, e_first = o[0][1], o[0][0]
+        n_rep = sum(v[1] for k, v in o.items() if k > 0)
+        e_rep = sum(v[0] * v[1] for k, v in o.items() if k > 0) / max(1, n_rep)
+        return n_first, e_first, n_rep, e_rep
+    nf_b, ef_b, nr_b, er_b = parts(b)
+    nf_m, ef_m, nr_m, er_m = parts(m)
+    f_b, f_m = nf_b / (nf_b + nr_b), nf_m / (nf_m + nr_m)
+    total = m["engaged_per_connected"] - b["engaged_per_connected"]
+    first = f_m * (ef_m - ef_b)
+    rep = (1 - f_m) * (er_m - er_b)
+    share = (f_m - f_b) * (ef_b - er_b)
+    se = (b["engaged_per_connected"] * (1 - b["engaged_per_connected"]) / (nf_b + nr_b) +
+          m["engaged_per_connected"] * (1 - m["engaged_per_connected"]) / (nf_m + nr_m)) ** 0.5
+    return {"total": total, "se": se, "z": total / se, "first_connect_rate": first, "repeat_connect_rate": rep,
+            "repeat_share_shift": share, "repeat_share_base": 1 - f_b, "repeat_share_ours": 1 - f_m}
+
+
 def main() -> int:
     mine, base = summarise(load(sys.argv[1])), summarise(load(sys.argv[2]))
     for wid in sorted(mine):
@@ -106,6 +127,13 @@ def main() -> int:
         for k in sorted(set(m["att"]) | set(b["att"])):
             bo, mo = b["att"].get(k, (0, 0, 0)), m["att"].get(k, (0, 0, 0))
             print(f"  attempt {k}{'+' if k == 4 else ''}: {bo[0]:.3f} {bo[1]:.4f} {bo[2]} | {mo[0]:.3f} {mo[1]:.4f} {mo[2]}")
+        d = decompose(m, b)
+        print(f"Decomposition of the change in engaged/connected ({d['total'] * 100:+.2f} pp, binomial SE"
+              f" {d['se'] * 100:.2f} pp, z {d['z']:+.1f}):")
+        print(f"  first-connect engagement itself : {d['first_connect_rate'] * 100:+.2f} pp")
+        print(f"  engagement of repeat connects   : {d['repeat_connect_rate'] * 100:+.2f} pp")
+        print(f"  more repeats (share {d['repeat_share_base']:.3f} -> {d['repeat_share_ours']:.3f}): "
+              f"{d['repeat_share_shift'] * 100:+.2f} pp")
         print("Our run by caller_id (pickup, engaged/connected, dials)")
         for k, (p, e, nn) in m["by_did"].items():
             print(f"  {k}: pickup {p:.3f}  engaged/connected {e:.4f}  dials {nn}")
