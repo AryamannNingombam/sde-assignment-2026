@@ -147,6 +147,7 @@ def _expire_flags(ctx: PlanContext, wid: str, ev, st: dict) -> None:
         if ctx.now - f["minute"] < settings.DID_FLAG_COOLDOWN_MINUTES or did in open_dids:
             continue
         del st["flagged"][did]
+        MEMO.pop((str(ctx.store.path), wid), None)  # this tick's evaluation predates the re-probe window: redo it
         st["tested"].pop(did, None)
         st["reprobe"][did] = {"minute": ctx.now, "flagged_minute": f["minute"]}
         ctx.store.add_decision(ctx.now, "did_flag_expired", f"flag on {did} expired after the cooldown; re-probing it at the"

@@ -99,3 +99,11 @@ def test_reprobe_status_until_it_has_its_own_fresh_dials():
     ev = de.Evaluation(500, FatigueCurve.flat(), {})
     ev.total_dials, ev.first_hour = {"D2": 20}, {"D2": 490}
     assert did.status_of(ev, "D2", st) == dp.REPROBE
+
+
+def test_expiry_invalidates_the_tick_memo_so_the_reprobe_window_is_applied(store):
+    key = (str(store.path), "w")
+    did.MEMO[key] = (0, "stale evaluation", {})
+    st = {"flagged": {"D2": {"minute": 0}}, "tested": {}, "reprobe": {}, "weak": {}, "pending": {}}
+    did._expire_flags(ctx_at(store, settings.DID_FLAG_COOLDOWN_MINUTES), "w", None, st)
+    assert key not in did.MEMO  # otherwise the producer would judge D2 on its pre-flag history and spread onto it
