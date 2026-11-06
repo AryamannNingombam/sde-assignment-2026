@@ -128,16 +128,16 @@ class ProposalRepo:
         return r is not None
 
     def recent_submit_failure(self, workflow_id: str, kind: str, route: str, now: int,
-                              backoff_min: int) -> bool:
+                              backoff_min: int, *, fixed: bool = False) -> bool:
         """Is (workflow, kind, route) backed off after SUBMIT_FAILED rows? The window starts at
-        ``backoff_min`` and doubles per failure in the last 24 h (capped at a day)."""
+        ``backoff_min`` and doubles per failure in the last 24 h (capped at a day); ``fixed`` skips the doubling."""
         rows = [r[0] for r in self.conn.execute(
             "SELECT created_minute FROM proposals WHERE workflow_id=? AND kind=? AND route=? AND"
             " state='SUBMIT_FAILED' AND created_minute>? ORDER BY created_minute",
             (workflow_id, kind, route, now - settings.MINUTES_PER_DAY))]
         if not rows:
             return False
-        window = min(backoff_min * 2 ** (len(rows) - 1), settings.MINUTES_PER_DAY)
+        window = backoff_min if fixed else min(backoff_min * 2 ** (len(rows) - 1), settings.MINUTES_PER_DAY)
         return now - rows[-1] < window
 
     def last_auto_minute(self, workflow_id: str) -> int | None:

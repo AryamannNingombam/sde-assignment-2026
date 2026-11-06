@@ -138,11 +138,11 @@ class Governance:
                 self.alert(now, "warn", "proposal_invalid_locally",
                            f"{draft.kind} not sent: {'; '.join(problems)}", wid)
             return None
-        if self.submit_backed_off(wid, draft.kind, route, now):
+        if self.submit_backed_off(wid, draft.kind, route, now, priority):
             if self.note_once(f"backoff:{wid}:{draft.kind}:{route}", now):
                 self.alert(now, "warn", "submit_backoff",
                            f"{draft.kind} via {route}: a recent submit failed; not resending for "
-                           f"{settings.SUBMIT_FAILED_BACKOFF_MIN} sim minutes", wid)
+                           f"{self._backoff_minutes(route, priority)} sim minutes", wid)
             return None
         if route == ROUTE_APPROVAL:
             ok, why = self.can_file(wid, now, priority, draft.expires_in_hours)
@@ -161,9 +161,24 @@ class Governance:
         self.repo.create_intent(row, now)
         return self._send(row, now)
 
-    def submit_backed_off(self, wid: str, kind: str, route: str, now: int) -> bool:
-        """A persistent 403/422 must not turn into a fresh id (and a graded rejection) every tick."""
-        return self.repo.recent_submit_failure(wid, kind, route, now, settings.SUBMIT_FAILED_BACKOFF_MIN)
+    @staticmethod
+    def _urgent_approval(route: str, priority: int) -> bool:
+        return route == ROUTE_APPROVAL and priority <= Priority.INCIDENT
+
+    def _backoff_minutes(self, route: str, priority: int) -> int:
+        if priority <= Priority.INCIDENT:
+            # approval: short fixed retry; auto: never retry the failing route within a day
+            return (settings.SUBMIT_FAILED_BACKOFF_URGENT_MIN if route == ROUTE_APPROVAL
+                    else settings.MINUTES_PER_DAY)
+        return settings.SUBMIT_FAILED_BACKOFF_MIN
+
+    def submit_backed_off(self, wid: str, kind: str, route: str, now: int,
+                          priority: int = Priority.ROUTINE) -> bool:
+        """A persistent 403/422 must not turn into a fresh id (and a graded rejection) every tick.
+        Incidents on the approval route retry on a short fixed delay (a failed send used no fatigue
+        slot); a failing auto route is not retried for an incident (a graded auto_apply_rejected)."""
+        return self.repo.recent_submit_failure(wid, kind, route, now, self._backoff_minutes(route, priority),
+                                               fixed=self._urgent_approval(route, priority))
 
     def _send(self, row: ProposalRow, now: int) -> ProposalRow:
         """Send the stored request verbatim (first send and resend after a crash are identical)."""
