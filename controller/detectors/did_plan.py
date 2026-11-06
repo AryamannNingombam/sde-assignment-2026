@@ -6,18 +6,27 @@ from typing import Mapping
 from .. import settings
 
 TESTED, UNTESTED, SUSPECT, FLAGGED, WEAK = "tested", "untested", "suspect", "flagged", "weak"
+REPROBE = "reprobe"  # an expired-flag DID being re-tested at the (smaller) re-probe cap
 BAD = (FLAGGED, WEAK)
 _EPS = 1e-12
 
 
-def probe_cap(h_bar: float) -> float:
+def probe_cap(h_bar: float, base_step: float | None = None) -> float:
     """Largest share ``s`` for an untested DID with the worst-case DID-health step above -2%.
 
-    ``s <= 0.015 * h_bar / (h_bar - h_floor)``: if the probe is as bad as ``h_floor`` the expected
-    health moves by ``s * (h_bar - h_floor) / h_bar`` <= 1.5%. h_floor is a documented prior.
+    ``s <= base_step * h_bar / (h_bar - h_floor)``: if the probe is as bad as ``h_floor`` the expected
+    health moves by ``s * (h_bar - h_floor) / h_bar`` <= base_step. h_floor is a documented prior. When
+    h_bar <= h_floor the formula diverges (the fleet is already as unhealthy as the worst case, so a probe
+    cannot make it worse): clamp to ``DID_PROBE_MAX_SHARE``, which also bounds every other result.
     """
-    gap = max(h_bar - settings.DID_H_FLOOR, 0.01)
-    return min(1.0, settings.DID_PROBE_BASE_STEP * h_bar / gap)
+    step = settings.DID_PROBE_BASE_STEP if base_step is None else base_step
+    if h_bar <= settings.DID_H_FLOOR:
+        return settings.DID_PROBE_MAX_SHARE
+    return min(settings.DID_PROBE_MAX_SHARE, step * h_bar / (h_bar - settings.DID_H_FLOOR))
+
+
+def reprobe_cap(h_bar: float) -> float:
+    return probe_cap(h_bar, settings.DID_REPROBE_HARM_BUDGET)
 
 
 def tv(a: Mapping[str, float], b: Mapping[str, float]) -> float:
@@ -29,23 +38,46 @@ def _clean(alloc: Mapping[str, float]) -> dict[str, float]:
     return {k: v / total for k, v in alloc.items() if v > _EPS} if total > 0 else {}
 
 
+def _evacuation_target(current: Mapping[str, float], status: Mapping[str, str], h_bar: float) -> dict[str, float]:
+    """Move every bad DID's share onto tested-healthy DIDs; untested DIDs only when no tested one exists.
+
+    Non-bad DIDs that already hold traffic (an untested probe, a suspect) keep what they have. The evacuated
+    mass goes to the tested DIDs evenly; with no tested DID it goes to untested ones, each capped at
+    max(probe cap, the evacuated share needed), and only then to suspects.
+    """
+    options = list(status)
+    bad_mass = sum(current.get(d, 0.0) for d in options if status[d] in BAD)
+    tested = [d for d in options if status[d] == TESTED]
+    untested = [d for d in options if status[d] in (UNTESTED, REPROBE)]
+    suspects = [d for d in options if status[d] == SUSPECT]
+    keep = {d: current.get(d, 0.0) for d in untested + suspects if current.get(d, 0.0) > _EPS}
+    if tested:
+        rest = max(1.0 - sum(keep.values()), 0.0)
+        return _clean({**keep, **{d: rest / len(tested) for d in tested}})
+    if untested:
+        cap = max(probe_cap(h_bar), bad_mass)
+        out = dict(keep)
+        for d in untested:  # evenly, each at most `cap` in total
+            out[d] = min(out.get(d, 0.0) + bad_mass / len(untested), cap)
+        return _clean(out)
+    if suspects:
+        return _clean({d: 1.0 for d in suspects})
+    return _clean(current)
+
+
 def target_allocation(current: Mapping[str, float], status: Mapping[str, str], h_bar: float
                       ) -> dict[str, float]:
     """Desired caller-ID split: even over non-bad DIDs, one untested DID probed at the cap.
 
-    While a bad (flagged/weak) DID still holds traffic this is an evacuation: untested DIDs may
-    take the evacuated traffic beyond the probe cap, since their worst case is no worse than the
-    bad source.
+    While a bad (flagged/weak) DID still holds traffic this is an evacuation (see ``_evacuation_target``).
     """
     options = list(status)
-    bad = [d for d in options if status[d] in BAD]
-    evacuating = any(current.get(d, 0.0) > _EPS for d in bad)
+    if any(current.get(d, 0.0) > _EPS for d in options if status[d] in BAD):
+        return _evacuation_target(current, status, h_bar)
     tested = [d for d in options if status[d] == TESTED]
     untested = [d for d in options if status[d] == UNTESTED]
+    reprobe = [d for d in options if status[d] == REPROBE]
     suspects = [d for d in options if status[d] == SUSPECT]
-    if evacuating:
-        receivers = tested + untested or suspects
-        return _clean({d: 1.0 for d in receivers}) if receivers else _clean(current)
     if not tested:
         return _clean(current)  # nothing is known to be healthy: change nothing
     cap = probe_cap(h_bar)
@@ -54,6 +86,8 @@ def target_allocation(current: Mapping[str, float], status: Mapping[str, str], h
         out[d] = min(current.get(d, 0.0), cap)
     if untested:
         out[untested[0]] = cap
+    for d in reprobe:  # a re-probe stays within a quarter of the harm line
+        out[d] = min(reprobe_cap(h_bar), cap)
     rest = max(1.0 - sum(out.values()), 0.0)
     for d in tested:
         out[d] = rest / len(tested)

@@ -451,7 +451,7 @@ def halluc_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         summary += (f": flags {s['rate']:.1%} vs {base} (n={s['n']}, p={s['p']:.1e}); "
                     f"validation {cand['validation_run_id']} pass {cand['pass_rate']:.3f}")
         excess = max(s["rate"] - s["base_rate"], 0.0)
-        evidence = {"validation_run_id": cand["validation_run_id"], "impact_override": min(1.0, excess / 0.01),
+        evidence = {"validation_run_id": cand["validation_run_id"], "impact_override": min(1.0, excess / max(_ceiling(ctx.workflows[wid]), 1e-9)),
                     "rationale": summary + f". Fix source: {cand['source']}; engagement is verified after apply."}
         out.append(DesiredChange(wid, "halluc_fix", Priority.INCIDENT, {"prompt_version": target},
                                  ROUTE_APPROVAL, evidence, summary))

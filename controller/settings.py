@@ -63,24 +63,43 @@ JOB_DAILY_BUNDLE = "daily_bundle"
 Z_ONE_SIDED_P001 = 3.0902  # one-sided p < 0.001
 
 # --- C5 caller-ID health --------------------------------------------------------------
-DID_H_FLOOR = 0.35  # PRIOR (A9): worst plausible relative DID health, used only by the probe cap
-DID_PROBE_BASE_STEP = 0.015  # tolerated worst-case DID-health step: harmful line is -2%, keep margin
+# Every threshold below is derived in docs/THRESHOLDS.md (name, value, derivation, sensitivity) from the
+# guardrail magnitude, effect-size/power arithmetic or the workflow's own policy values; none is fitted to a
+# public scenario's truth.
+_GUARDRAIL = 0.02  # the harmful line used by the brief's guardrails: -2% on the guarded KPI
+DID_PROBE_BASE_STEP = 0.015  # tolerated worst-case DID-health step: harmful line is -2%, keep 0.5pp margin
+DID_H_FLOOR = 0.25  # PRIOR (A9): a spam-labelled number answers ~1/4 as often (carrier labels cut answer rates ~75%)
+DID_PROBE_MAX_SHARE = 0.25  # hard cap on any probe share (also used when h_bar <= h_floor, where the formula diverges)
+DID_REPROBE_HARM_BUDGET = _GUARDRAIL / 4  # a re-probe of an expired-flag DID may cost at most a quarter of the line
 DID_FATIGUE_TAU_GRID_DAYS = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0)  # decay windows tried by fit
 DID_CURVE_MIN_OBS = 8  # (DID, day) observations needed before a curve is trusted; else flat
-DID_FLAG_WINDOWS_HOURS = (1, 2, 3)  # rolling windows for the step test (3 h as in CONTEXT C5)
+DID_FLAG_WINDOWS_HOURS = (1, 2, 3, 6)  # rolling windows for the step test (3 h as in CONTEXT C5; 6 h adds power)
 DID_FLAG_MIN_DIALS = 150  # each side of the step test
-# CONTEXT C5 says p < 0.001 per test; the test is repeated every tick on 3 overlapping windows (~100
-# looks/DID-day), so the per-look level is tightened (Bonferroni-style) to keep false flags rare.
+# CONTEXT C5 says p < 0.001 per test; the test is repeated every tick on 4 overlapping windows (~130 looks/DID-day),
+# so the per-look level is tightened (Bonferroni-style: 0.001 / ~100) to keep false flags rare.
 DID_FLAG_P = 1e-5
-DID_FLAG_MIN_DROP = 0.30  # relative pickup-ratio drop that counts as a step (effect-size gate)
+DID_FLAG_P_UNFITTED = 1e-7  # stricter level while the fatigue curve is flat/cold: load effects cannot be adjusted away
+# Effect-size gate. A DID holding share s whose pickup falls by d costs the workflow s*d; at the smallest useful
+# even split of 2 DIDs a 12% step costs 6% = 3x the 2% guardrail, so smaller steps are not worth an incident.
+DID_FLAG_MIN_DROP = 0.12
+DID_FLAG_PERSIST_EVALS = 2  # the flag condition must hold on this many consecutive evaluations before opening
+DID_FLAG_PERSIST_GAP_MINUTES = 120  # ... evaluations further apart than this restart the count
 DID_FLAG_REF_HOURS = 24  # "prior day"
 DID_FLAG_SHARE_BAND = (0.5, 2.0)  # share must be roughly unchanged between window and reference
+DID_FLAG_COOLDOWN_MINUTES = 2 * MINUTES_PER_DAY  # a flag expires after this; the DID is then re-probed at the reprobe cap
 DID_EVAC_FAST_RATIO = 0.6  # estimated ratio below this: evacuate at once despite in-flight approvals
+DID_SHARE_WINDOW_HOURS = 12  # trailing window for OBSERVED per-DID traffic shares (config lags next_campaign_only)
+DID_SHARE_MIN_DIALS = 50  # fewer dials than this in the window: the observed share is unknown, use the config
+DID_EVAC_CLOSE_SHARE = 0.005  # an evacuation incident closes when the DID's observed share is below this
 DID_PASS_MIN_DIALS = 100  # dials a probed DID needs before it can be judged
 DID_PASS_MIN_AGE_HOURS = 24  # "after >= 1 day passing"
-DID_PASS_RATIO = 0.8  # relative-health point estimate (vs comparable-load peers) to count as passing
 DID_WEAK_MIN_DIALS = 150
-DID_WEAK_MARGIN = 0.20  # weak base: significantly below (1 - margin) x expected at comparable load
+# Materiality of a weak base: a DID whose pickup at comparable load is >= 15% below its peers costs, at a 3-way
+# split, 5% = 2.5x the 2% guardrail, so removing it is clearly worth an approval slot; smaller gaps are not.
+DID_WEAK_MARGIN = 0.15
+# Passing = NOT significantly (one-sided p<0.05) below the same (1 - margin) line. A point-estimate rule would fail ~1 in 6
+# healthy DIDs at the minimum n (se of a pickup ratio at n=100 is ~15%) and strand them as 'suspect' forever.
+DID_PASS_Z = 1.645
 DID_WEAK_WINDOW_HOURS = 48
 DID_WEAK_LOAD_SLACK = 1.25  # "comparable load": own load <= peers' load x slack
 DID_STEP_SAFETY = 0.95  # use at most this fraction of max_shift per auto-apply step

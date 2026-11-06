@@ -24,8 +24,8 @@ class StepResult:
     share_window: float
     share_ref: float
 
-    def flagged(self) -> bool:
-        return self.test.drop >= settings.DID_FLAG_MIN_DROP and self.test.p < settings.DID_FLAG_P
+    def flagged(self, level: float = settings.DID_FLAG_P) -> bool:
+        return self.test.drop >= settings.DID_FLAG_MIN_DROP and self.test.p < level
 
     def as_dict(self) -> dict:
         return {"did": self.did, "window_h": self.window_hours, "n": self.n_window,
@@ -66,6 +66,8 @@ class Evaluation:
     first_hour: dict[str, int | None] = field(default_factory=dict)
     total_dials: dict[str, int] = field(default_factory=dict)
     window_dials: dict[str, int] = field(default_factory=dict)
+    shares: dict[str, float] = field(default_factory=dict)  # OBSERVED trailing traffic share per DID
+    share_dials: int = 0  # dials behind ``shares`` (0: unknown)
 
 
 def _hour_loads(series: DidSeries, curve: FatigueCurve, lo: int, hi: int):
@@ -116,10 +118,10 @@ def step_tests(series: DidSeries, curve: FatigueCurve, cur_hour: int, candidates
     return out
 
 
-def flagged_step(results: Sequence[StepResult]) -> StepResult | None:
+def flagged_step(results: Sequence[StepResult], level: float = settings.DID_FLAG_P) -> StepResult | None:
     """Most significant qualifying step with share roughly unchanged, else None."""
     lo, hi = settings.DID_FLAG_SHARE_BAND
-    ok = [r for r in results if r.flagged() and r.share_ref > 0
+    ok = [r for r in results if r.flagged(level) and r.share_ref > 0
           and lo <= r.share_window / r.share_ref <= hi]
     return min(ok, key=lambda r: r.test.p) if ok else None
 
@@ -155,15 +157,37 @@ def peer_comparison(series: DidSeries, curve: FatigueCurve, did: str, hours: ran
     return PeerResult(did, n_tot, x, exp, x / exp, z, l_did, l_peer)
 
 
+def observed_shares(series: DidSeries, cur_hour: int) -> tuple[dict[str, float], int]:
+    """Trailing per-DID traffic shares from the calls actually dialled (not the config, which lags
+    ``next_campaign_only``). Widens from 12 h to 24 h when the short window has too few dials."""
+    for hours in (settings.DID_SHARE_WINDOW_HOURS, 24):
+        dials, _ = series.window(range(cur_hour - hours + 1, cur_hour + 1))
+        total = sum(dials.values())
+        if total >= settings.DID_SHARE_MIN_DIALS:
+            return {d: n / total for d, n in dials.items()}, total
+    return {}, 0
+
+
 def evaluate(series: DidSeries, curve: FatigueCurve, cur_hour: int, options: Sequence[str],
-             flagged: Sequence[str] = (), bad: Sequence[str] = ()) -> Evaluation:
-    """One full evaluation at ``cur_hour`` (absolute hour of the current sim minute)."""
+             flagged: Sequence[str] = (), bad: Sequence[str] = (), since: Mapping[str, int] | None = None
+             ) -> Evaluation:
+    """One full evaluation at ``cur_hour`` (absolute hour of the current sim minute).
+
+    ``since`` maps re-probed DIDs to the absolute hour their re-probe started: older dials of such a DID
+    (from before it was flagged) say nothing about its present health and are ignored for its judgement.
+    """
+    since = since or {}
     long_h = max(settings.DID_WEAK_WINDOW_HOURS, 72)
     loads = _hour_loads(series, curve, cur_hour - long_h - 1, cur_hour + 1)
     ev = Evaluation(cur_hour, curve, dict(loads.get(cur_hour, {})))
     used = [d for d in options if series.total_dials(d) > 0]
     ev.total_dials = {d: series.total_dials(d) for d in options}
     ev.first_hour = {d: series.first_hour(d) for d in options}
+    ev.shares, ev.share_dials = observed_shares(series, cur_hour)
+    for d, start in since.items():  # judge a re-probed DID only on its post-expiry traffic
+        hrs = [h for h in range(start, cur_hour + 1) if series.dials.get(h, {}).get(d)]
+        ev.total_dials[d] = sum(series.dials[h][d] for h in hrs)
+        ev.first_hour[d] = hrs[0] if hrs else None
     dw, _ = series.window(range(cur_hour - long_h + 1, cur_hour + 1))
     ev.window_dials = {d: dw.get(d, 0) for d in options}
     candidates = [d for d in used if d not in bad]
@@ -174,7 +198,8 @@ def evaluate(series: DidSeries, curve: FatigueCurve, cur_hour: int, options: Seq
         if not refs:
             continue
         for hours in (settings.DID_WEAK_WINDOW_HOURS, long_h):
-            res = peer_comparison(series, curve, d, range(cur_hour - hours + 1, cur_hour + 1), refs, loads)
+            res = peer_comparison(series, curve, d, range(max(cur_hour - hours + 1, since.get(d, -10**9)), cur_hour + 1),
+                                  refs, loads)
             if res is not None and res.n >= settings.DID_PASS_MIN_DIALS:
                 ev.peers[d] = res
                 if hours == settings.DID_WEAK_WINDOW_HOURS and res.n >= settings.DID_WEAK_MIN_DIALS:

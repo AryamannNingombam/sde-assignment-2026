@@ -49,9 +49,10 @@ def test_flagged_did_is_detected_and_evacuated_without_hygiene_errors(flagged_wo
     assert row is not None, "D2 never flagged"
     assert when(2, 10) <= row[0] <= when(2, 12, 30)  # within a couple of hours of onset
     step = json.loads(row[1])["step"]
-    assert step["did"] == "D2" and step["p"] < 0.001 and step["drop"] > 0.3
+    assert step["did"] == "D2" and step["p"] < 0.001 and step["drop"] > settings.DID_FLAG_MIN_DROP
     cfg = client.get_config("ks_cancel")["config"]
     assert cfg["allocations"]["default"]["caller_id"].get("D2", 0.0) == pytest.approx(0.0)
+    run_to(ctl, client, when(3, 12))  # observed share must wash out of the trailing window before it closes
     inc = store.conn.execute("select state, kind from incidents").fetchall()
     assert ("closed", "did_flagged") in inc
     # steps respected max_shift 0.2 and the policy: no graded refusals/conflicts/lapses

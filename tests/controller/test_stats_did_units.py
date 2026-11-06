@@ -103,12 +103,15 @@ def test_step_test_load_adjustment_explains_a_drop():
 # ------------------------------------------------------------------ probe cap
 def test_probe_cap_formula():
     h = 0.8
-    assert dp.probe_cap(h) == pytest.approx(0.015 * h / (h - 0.35))
-    assert dp.probe_cap(1.0) == pytest.approx(0.015 / 0.65)
+    assert dp.probe_cap(h) == pytest.approx(0.015 * h / (h - settings.DID_H_FLOOR))
+    assert dp.probe_cap(1.0) == pytest.approx(0.015 / (1 - settings.DID_H_FLOOR))
     # worst case: a probed DID at h_floor costs at most 1.5% of expected DID health
     s = dp.probe_cap(h)
     assert s * (h - settings.DID_H_FLOOR) / h == pytest.approx(0.015)
-    assert dp.probe_cap(0.3) <= 1.0  # h <= h_floor never yields a nonsense/negative cap
+    assert dp.probe_cap(0.3) <= settings.DID_PROBE_MAX_SHARE
+    assert dp.probe_cap(settings.DID_H_FLOOR) == settings.DID_PROBE_MAX_SHARE  # clamp at h <= h_floor
+    assert dp.probe_cap(0.1) == settings.DID_PROBE_MAX_SHARE
+    assert dp.reprobe_cap(0.9) < dp.probe_cap(0.9)
 
 
 # ------------------------------------------------------------------ allocation planning
@@ -135,11 +138,23 @@ def test_target_excludes_bad_dids_and_goes_even_when_all_tested():
     assert all(v == pytest.approx(1 / 3) for v in t.values())
 
 
-def test_evacuation_target_lets_untested_take_traffic_beyond_probe_cap():
+def test_evacuation_prefers_tested_and_keeps_existing_untested_probe():
     st = {"D1": dp.TESTED, "D2": dp.FLAGGED, "D3": dp.UNTESTED}
-    t = dp.target_allocation({"D1": 1 / 3, "D2": 1 / 3, "D3": 1 / 3}, st, 0.9)
-    assert t == {"D1": pytest.approx(0.5), "D3": pytest.approx(0.5)}
-    assert t["D3"] > dp.probe_cap(0.9)
+    t = dp.target_allocation({"D1": 0.4, "D2": 0.4, "D3": 0.2}, st, 0.9)
+    assert t == {"D1": pytest.approx(0.8), "D3": pytest.approx(0.2)}  # D3 keeps its holding, D1 absorbs D2
+
+
+def test_evacuation_uses_untested_only_when_no_tested_exists_capped_at_need():
+    st = {"D1": dp.FLAGGED, "D2": dp.UNTESTED, "D3": dp.UNTESTED}
+    t = dp.target_allocation({"D1": 0.6, "D2": 0.4}, st, 0.9)
+    assert "D1" not in t and sum(t.values()) == pytest.approx(1.0)
+    assert t["D2"] > dp.probe_cap(0.9)  # needed share exceeds the probe cap: cap = max(probe cap, need)
+
+
+def test_reprobe_stays_within_a_quarter_of_the_harm_line():
+    st = {"D1": dp.TESTED, "D2": dp.REPROBE}
+    t = dp.target_allocation({"D1": 1.0}, st, 0.9)
+    assert t["D2"] == pytest.approx(dp.reprobe_cap(0.9)) and t["D2"] * (0.9 - settings.DID_H_FLOOR) / 0.9 <= 0.005 + 1e-9
 
 
 def test_evacuation_steps_respect_max_shift_and_end_with_zero():

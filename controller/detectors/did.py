@@ -18,7 +18,7 @@ from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChang
 from ..incidents import close_incident, open_incident, open_incidents
 from . import did_data, did_eval, did_plan
 from .common import latest_config, load_state, save_state
-from .did_plan import BAD, FLAGGED, SUSPECT, TESTED, UNTESTED, WEAK
+from .did_plan import BAD, FLAGGED, REPROBE, SUSPECT, TESTED, UNTESTED, WEAK
 from .fatigue_curve import FatigueCurve, fit_curve
 
 log = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ MEMO: dict[tuple[str, str], tuple[int, did_eval.Evaluation, dict]] = {}
 # ------------------------------------------------------------------ persisted verdicts
 def _state(store, wid: str) -> dict:
     st = load_state(store, DETECTOR, wid)
-    for key in ("flagged", "weak", "tested"):
+    for key in ("flagged", "weak", "tested", "reprobe", "pending"):
         st.setdefault(key, {})
     return st
 
@@ -53,18 +53,22 @@ def status_of(ev: did_eval.Evaluation, did: str, st: Mapping) -> str:
     if did in st["tested"]:
         return TESTED
     first = ev.first_hour.get(did)
+    reprobing = did in st["reprobe"]
     if (ev.total_dials.get(did, 0) < settings.DID_PASS_MIN_DIALS or first is None
             or ev.cur_hour - first < settings.DID_PASS_MIN_AGE_HOURS):
-        return UNTESTED
+        return REPROBE if reprobing else UNTESTED
     peer = ev.peers.get(did)
-    if peer is None or peer.q >= settings.DID_PASS_RATIO:
+    if peer is None or peer.z_weak > -settings.DID_PASS_Z:  # not significantly (p<0.05) below the materiality line
         return TESTED
     return SUSPECT
 
 
 def h_bar(ev: did_eval.Evaluation, alloc: Mapping[str, float]) -> float:
-    total = sum(alloc.values()) or 1.0
-    return sum(w * ev.curve.h(ev.loads_now.get(d, 0.0)) for d, w in alloc.items()) / total
+    """Traffic-weighted relative health. Weights are the OBSERVED trailing shares when known (the config
+    share lags ``next_campaign_only`` and cohort overrides), else the config allocation."""
+    weights = ev.shares if ev.share_dials >= settings.DID_SHARE_MIN_DIALS and ev.shares else alloc
+    total = sum(weights.values()) or 1.0
+    return sum(w * ev.curve.h(ev.loads_now.get(d, 0.0)) for d, w in weights.items()) / total
 
 
 # ------------------------------------------------------------------ detector
@@ -80,8 +84,9 @@ def _evaluate(ctx: PlanContext, wid: str) -> tuple[did_eval.Evaluation, dict] | 
         return None
     st = _state(ctx.store, wid)
     curve = _curve(ctx.store, wid, series, ctx.now, st)
-    ev = did_eval.evaluate(series, curve, ctx.now // 60, options, list(st["flagged"]),
-                           list(st["flagged"]) + list(st["weak"]))
+    since = {d: v["minute"] // 60 for d, v in st["reprobe"].items()}
+    ev = did_eval.evaluate(series, curve, ctx.now // 60, options, list(st["flagged"]) + list(st["reprobe"]),
+                           list(st["flagged"]) + list(st["weak"]), since)
     MEMO[key] = (ctx.now, ev, st)
     return ev, st
 
@@ -111,20 +116,61 @@ def _mark_weak_and_tested(ctx: PlanContext, wid: str, ev, st: dict, options) -> 
     for did in options:
         if did not in st["tested"] and status_of(ev, did, st) == TESTED:
             st["tested"][did] = ctx.now
+            st["reprobe"].pop(did, None)
             ctx.store.add_decision(ctx.now, "did_tested", f"{did} passes: not worse than peers at its load",
                                    wid, {"did": did, "peer": ev.peers[did].as_dict() if did in ev.peers else None,
                                          "dials": ev.total_dials.get(did)})
 
 
-def _close_evacuated(ctx: PlanContext, wid: str, st: dict) -> None:
+def _close_evacuated(ctx: PlanContext, wid: str, ev, st: dict) -> None:
+    """An evacuation closes when the flagged DID's OBSERVED trailing share is ~0 (the config share says what
+    we asked for; under next_campaign_only old campaigns keep their DID until their cadence ends)."""
     cfg = latest_config(ctx.store, wid)
-    if cfg is None:
+    if cfg is None or ev.share_dials < settings.DID_SHARE_MIN_DIALS:
         return
-    share = dist(cfg[1], "default", "caller_id")
     for inc in open_incidents(ctx.store, wid, "did_flagged"):
         did = inc["body"]["did"]
-        if share.get(did, 0.0) <= 1e-9:
-            close_incident(ctx.store, inc["id"], ctx.now, f"{did} evacuated: share 0 in config v{cfg[0]}")
+        if ev.shares.get(did, 0.0) < settings.DID_EVAC_CLOSE_SHARE and _config_share(cfg[1], did) <= 1e-9:
+            close_incident(ctx.store, inc["id"], ctx.now, f"{did} evacuated: observed share {ev.shares.get(did, 0.0):.2%}"
+                           f" over the trailing window, config v{cfg[0]} share 0 in every key")
+
+
+def _config_share(cfg: Mapping, did: str) -> float:
+    """Largest configured share of ``did`` over every allocation key that sets caller_id."""
+    return max((dist(cfg, key, "caller_id").get(did, 0.0) for key in _keys(cfg)), default=0.0)
+
+
+def _expire_flags(ctx: PlanContext, wid: str, ev, st: dict) -> None:
+    """A flag is not permanent: after the cooldown (and once evacuated) the DID is re-probed at the re-probe cap."""
+    open_dids = {i["body"]["did"] for i in open_incidents(ctx.store, wid, "did_flagged")}
+    for did, f in sorted(st["flagged"].items()):
+        if ctx.now - f["minute"] < settings.DID_FLAG_COOLDOWN_MINUTES or did in open_dids:
+            continue
+        del st["flagged"][did]
+        st["tested"].pop(did, None)
+        st["reprobe"][did] = {"minute": ctx.now, "flagged_minute": f["minute"]}
+        ctx.store.add_decision(ctx.now, "did_flag_expired", f"flag on {did} expired after the cooldown; re-probing it at the"
+                               " re-probe cap", wid, {"did": did, "flagged": f})
+
+
+def _persisted(ctx: PlanContext, st: dict, cand) -> bool:
+    """The flag condition must hold on DID_FLAG_PERSIST_EVALS consecutive evaluations (one noisy look is not enough)."""
+    pend = st["pending"]
+    for d in [d for d in pend if cand is None or d != cand.did]:
+        del pend[d]  # a clean evaluation (or a different DID) restarts the count
+    if cand is None:
+        return False
+    e = pend.get(cand.did)
+    if e and ctx.now - e["last"] <= settings.DID_FLAG_PERSIST_GAP_MINUTES:
+        e["count"] += 1
+    else:
+        e = {"count": 1, "first": ctx.now}
+    e["last"] = ctx.now
+    pend[cand.did] = e
+    if e["count"] >= settings.DID_FLAG_PERSIST_EVALS:
+        del pend[cand.did]
+        return True
+    return False
 
 
 def did_detector(ctx: PlanContext) -> None:
@@ -139,11 +185,15 @@ def did_detector(ctx: PlanContext) -> None:
             continue
         ev, st = got
         active = sum(ev.window_dials.values()) > 0 and ctx.now % 1440 // 60 in range(*ctx.workflows[wid]["dialling_window"])
-        flagged = did_eval.flagged_step(ev.steps) if active else None
-        if flagged is not None and flagged.did not in st["flagged"]:
+        level = settings.DID_FLAG_P if ev.curve.fitted else settings.DID_FLAG_P_UNFITTED  # flat curve: stricter
+        flagged = did_eval.flagged_step(ev.steps, level) if active else None
+        if flagged is not None and flagged.did in st["flagged"]:
+            flagged = None
+        if active and _persisted(ctx, st, flagged):
             _flag(ctx, wid, ev, st, flagged)
         _mark_weak_and_tested(ctx, wid, ev, st, options)
-        _close_evacuated(ctx, wid, st)
+        _close_evacuated(ctx, wid, ev, st)
+        _expire_flags(ctx, wid, ev, st)
         save_state(ctx.store, DETECTOR, wid, st)
         if active:
             _log_evaluation(ctx, wid, ev, st, options)
@@ -204,9 +254,8 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
 
 
 def _change(wid, patch, status, st, ev, notes, limit, cfg) -> DesiredChange:
-    flagged_live = [d for d in st["flagged"]
-                    if dist(cfg, "default", "caller_id").get(d, 0.0) > 1e-9]
-    bad_live = [d for d in st["weak"] if dist(cfg, "default", "caller_id").get(d, 0.0) > 1e-9]
+    flagged_live = [d for d in st["flagged"] if _config_share(cfg, d) > 1e-9]  # in ANY allocation key
+    bad_live = [d for d in st["weak"] if _config_share(cfg, d) > 1e-9]
     status_txt = ", ".join(f"{d}={s}" for d, s in status.items())
     evidence = {"rationale": f"caller-ID load spreading; statuses: {status_txt}; " + "; ".join(notes)}
     route = ROUTE_AUTO if limit is not None else ROUTE_APPROVAL
@@ -216,7 +265,7 @@ def _change(wid, patch, status, st, ev, notes, limit, cfg) -> DesiredChange:
         summary = (f"Evacuate flagged caller ID {', '.join(flagged_live)} (pickup ratio vs peers x{worst:.2f}): "
                    + "; ".join(notes))
         return DesiredChange(wid, "did_evacuation", Priority.INCIDENT, patch, route, evidence, summary)
-    kind = "did_rebalance" if bad_live else ("did_probe" if UNTESTED in status.values() else "did_spread")
+    kind = "did_rebalance" if bad_live else ("did_probe" if (UNTESTED in status.values() or REPROBE in status.values()) else "did_spread")
     summary = {"did_rebalance": "Move traffic off weak-base caller ID", "did_probe": "Probe/spread caller IDs within "
                "the safe probe cap", "did_spread": "Spread calls evenly over healthy caller IDs"}[kind]
     return DesiredChange(wid, kind, Priority.ROUTINE, patch, route, evidence,
