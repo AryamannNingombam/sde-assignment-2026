@@ -70,10 +70,18 @@ after it cleared (event alerts fire once per event); restarts do not re-alert.
 
 ### DIGEST (read in the morning)
 
-`judgement_rejection` (an approver said no, nothing changed; the planner re-plans), `starved_experiment` (an arm has
+`person_analysis_failed` (the optional daily per-person analysis raised; the loop carried on and nothing was proposed: read the message, the job is off by default and can be ignored), `judgement_rejection` (an approver said no, nothing changed; the planner re-plans), `starved_experiment` (an arm has
 under 100 connects after 2 days: it cannot conclude), `weak_base_did` (a number is simply weak, not a casualty of a
 probe), `kpi_drift` (pickup or engagement for the finished day is beyond |z| 3 of the hour-adjusted trailing 3-day
 level with no config change or incident that day: find out why before the next change).
+
+### Quick on-call triage
+
+1. `python -m controller status --state-dir state`: is `sim_minute` moving, is lag small, any PAGE alert in the last 24 h?
+2. A change you do not understand: `why --workflow W --at "Day N HH:MM"` (active version, proposal, approval, evidence, what superseded it).
+3. A customer question: `why --lead <workflow:lead_id> --day N`.
+4. Controller dead: re-run `./run.sh <url>`; it reconciles before acting (section 1). Do not delete `state/` mid-run.
+5. Optional feature: `ENABLE_PERSON_ANALYSIS` (`controller/settings.py`) is False because it cost +22% tick time on a short public_01 run (`SUBMISSION.md` section 12). It is analysis only and never writes config; to see its report on demand use `python -m controller person-analysis --db <store>`.
 
 ## 5. Corrupted or foreign database
 
