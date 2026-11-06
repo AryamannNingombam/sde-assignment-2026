@@ -179,9 +179,11 @@ EXP_DROP_Z = -1.0  # a challenger at z <= -1 is dropped in the next daily bundle
 EXP_HARM_Z = -3.0  # harm-stop (every 4 h): z <= -3 with >= EXP_HARM_MIN_CONNECTS connects
 EXP_HARM_MIN_CONNECTS = 150
 EXP_HARM_CHECK_MINUTES = 240
-EXP_ALPHA = 0.05  # overall one-sided familywise level of the winner decision (all scopes together)
-EXP_ALPHA_WORKFLOW = 0.04  # share of EXP_ALPHA for the workflow-level test; each analysis group gets 0.005
-EXP_ALPHA_GROUP = 0.005
+EXP_ALPHA = 0.05  # one-sided familywise level of the winner decisions of ONE workflow (welcome and voice, all scopes)
+EXP_DIMS_PER_WORKFLOW = 2  # Bonferroni split across the two dims that run concurrently
+EXP_ALPHA_DIM = EXP_ALPHA / EXP_DIMS_PER_WORKFLOW
+EXP_ALPHA_WORKFLOW = 0.8 * EXP_ALPHA_DIM  # per dim: workflow-level test ...
+EXP_ALPHA_GROUP = 0.1 * EXP_ALPHA_DIM  # ... plus two analysis groups at one tenth each
 EXP_LOOK_FRACTIONS = (0.25, 0.5, 0.75, 1.0)  # <= 4 planned looks at these information fractions
 EXP_DESIGN_MDE = 0.10  # relative lift the experiment is sized for (information fraction denominator)
 EXP_DESIGN_POWER = 0.80

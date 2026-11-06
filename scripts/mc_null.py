@@ -72,7 +72,7 @@ def simulate(seed: int, lifts: dict[str, float]) -> dict:
     group = rng.integers(0, 2, size=LEADS)
     shares = exp_alloc.entry_shares(CHALLENGERS)
     active, ramped, dropped = list(CHALLENGERS), [], []
-    scopes = {"all": settings.EXP_ALPHA_WORKFLOW, "g0": settings.EXP_ALPHA_GROUP, "g1": settings.EXP_ALPHA_GROUP}
+    scopes = {"all": settings.EXP_ALPHA_WORKFLOW, "g0": settings.EXP_ALPHA_GROUP, "g1": settings.EXP_ALPHA_GROUP}  # one dim
     cum = {s: {arm: ({}, {}) for arm in (CONTROL, *CHALLENGERS)} for s in scopes}
     st = {s: {"arm_t": {}, "looks": 0} for s in scopes}
     for day in range(DAYS):
@@ -136,8 +136,8 @@ def main() -> None:
              f"engagement {ENGAGE}, {DAYS} days, {LEADS} leads with intra-lead correlation {ICC}, one control and two "
              "challengers entering at 7.5% (ramp to 20% after >= 1 day and >= 100 connects when the point estimate is "
              f">= control, drop at z <= -1), one workflow test (alpha {settings.EXP_ALPHA_WORKFLOW}) and two "
-             f"pre-registered half-traffic analysis groups (alpha {settings.EXP_ALPHA_GROUP} each; total "
-             f"{settings.EXP_ALPHA}). Decision: <= 4 Lan-DeMets O'Brien-Fleming looks at information fractions "
+             f"pre-registered half-traffic analysis groups (alpha {settings.EXP_ALPHA_GROUP} each; {settings.EXP_ALPHA_DIM} "
+             f"per dim, {settings.EXP_ALPHA} per workflow over its two dims). Decision: <= 4 Lan-DeMets O'Brien-Fleming looks at information fractions "
              "0.25/0.5/0.75/1, Holm across the 2 arms, point lift >= 3%, recent-24h lower bound > 0, pickup "
              f"non-inferiority (margin {MAX_DROP}). Looks happen at the end of each day.", "",
              "| scenario | runs | any promotion | promoted A | promoted B | median day of A's promotion |",
@@ -146,6 +146,7 @@ def main() -> None:
         md = "-" if r["median_day"] is None else f"{r['median_day']:.0f}"
         lines.append(f"| {r['label']} | {r['runs']} | {r['any']:.1%} | {r['right']:.1%} | {r['wrong']:.1%} | {md} |")
     lines += ["", f"False-winner rate (null, any arm, any scope): **{rows[0]['any']:.1%}** (target <= 5%). "
+              "A null scenario has 4 experiments (2 workflows x 2 dims), so the chance of at least one false promotion is about 4x this. "
               "Power is the share of runs promoting the truly better arm A within the 8-day run."]
     Path(ns.out).parent.mkdir(parents=True, exist_ok=True)
     Path(ns.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
