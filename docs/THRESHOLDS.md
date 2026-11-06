@@ -134,7 +134,7 @@ of the base rate. Not modelled: lead-mix drift inside a day (arm assignment is p
 Decay detection has a physical bound: a decaying variant at 20% share carries ~180 connects/day, so a one-day contrast
 has se ~10%; a lift falling from +15% to -10% over 2 days cannot be told from noise until about 3-4 days after onset
 without a false-alarm rate that would drop healthy arms. `reports/mc_null.md` quantifies what each layer buys
-(share of the decaying arm at onset + 2 days, exposure-days at the winner share, rollback latency in 4-hour ticks).
+(share of the decaying arm at onset + 2 days, exposure-days at the winner share, rollback latency in 4-hour ticks). Measured: a promoted decaying winner is rolled back in every run that promotes it, a median of 11-14 ticks (~2 days) after stage 1 goes live, with ~1.1-1.2 exposure-days at the winner share after onset; the decaying arm's share is <= 0.1 at onset + 2 days in only 2-16% of runs (approval latency 20 h-2 h).
 
 ## Caller-ID weak-base rebalance (item 9)
 
