@@ -1,0 +1,108 @@
+# On-call runbook
+
+The controller is one process (`python -m controller run`) wrapped by `run.sh`. All of its memory is one SQLite file per
+simulated world. Anything it does is reconstructible from that file plus the simulator.
+
+## 1. Run, stop, restart
+
+| Task | Command |
+|---|---|
+| Start the simulator (dev) | `python -m sim serve --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01 --force` (port 8700) |
+| Start the controller | `./run.sh http://127.0.0.1:8700` (waits for `/health`, restarts a crashed controller up to 20 times, exits 0 only when the scenario has finished) |
+| Stop | Ctrl-C the `run.sh` (or `kill` it, then the `python -m controller run` child). Nothing needs cleanup. |
+| Restart | Run `./run.sh` again. The controller reconciles every in-flight proposal against the simulator before it does anything else (INTENT / PENDING / APPROVED are re-read, never blindly re-sent). |
+| Fresh start | `rm -rf state/` (or use `STATE_DIR=state/x ./run.sh ...`). Never delete the DB while the simulator is mid-run unless you also restart the simulator: the history before the delete is gone and approvals in flight would be orphaned. |
+| Supervisor screen | `python -m controller ui --state-dir state --port 8800` (separate process, read-only, never started by `run.sh`) |
+
+If the **simulator** restarts, it is a new world: the controller detects the regression, archives the old DB as
+`<name>.<timestamp>.old` and starts a new one. That is expected, not an incident.
+
+## 2. Where state lives
+
+* `state/<scenario>-<fingerprint8>.db` (+ `-wal`, `-shm`): the only state. WAL mode, one writer (the controller).
+  The fingerprint is scenario + hash of the first history line, so a different world gets a different file.
+* `runs/`: simulator run directories and grade inputs (not controller state).
+* `reports/`: grade reports and the crash-test log.
+
+Key tables: `calls`, `cube` (rollups), `config_versions` (every config, actor), `proposals` + `proposal_events`
+(approval state machine), `decisions` (the audit trail: every detector verdict with inputs), `incidents`,
+`detector_state` (experiment / DID / halluc state machines), `alerts`, `metrics`, `metrics_ext`.
+
+## 3. Reading the loop without reading logs
+
+```
+python -m controller status  --state-dir state            # loop health, latest tick + last 24 sim hours
+python -m controller view    --state-dir state --workflow nw_renewal [--at "Day 3 14:00"]
+python -m controller view    --state-dir state --weekly   # operational auto-applies for Compliance
+python -m controller why     --state-dir state --workflow nw_renewal --at "Day 3 14:00"
+python -m controller why     --state-dir state --lead <lead_id>
+```
+
+`status` shows: events ingested, ingest wall time, lag (wall seconds advance-return to decisions-done, and sim minutes
+since the newest event), decisions per sim hour, credits remaining and 24 h burn, approvals in flight with the nearest
+`apply_by`/expiry, local 4xx / 409 / 403 / 5xx counts, and how many page/digest alerts fired in the last 24 sim hours.
+
+`view` has the six sections the client supervisor asked for: what's being tested, what's winning, what we need from
+you, what changed today (each change has its own `why` command), open incidents and alerts, and KPIs today vs the
+trailing three days (pickup and engagement are always separate numbers). `ui` serves the same content as web pages
+(`/`, `/wf/<id>`, `/weekly`, `/why?workflow=&at=`, `/status`); it opens the DB `mode=ro`, so it is safe beside a live run.
+If the port is busy it exits 1 and says so: pass `--port`.
+
+Add `--db path/to.db` to any of these to point at a specific file (default: the newest `*.db` in `--state-dir`).
+
+## 4. Alerts
+
+Alerts are rows in the `alerts` table (also logged at WARNING) and appear in `view` / `/wf/<id>`. There is no pager
+integration: *page* means someone should look now. Each alert fires once when its condition becomes true and again only
+after it cleared (event alerts fire once per event); restarts do not re-alert.
+
+### PAGE
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `ingest_stalled` | No new calls for 3+ sim hours although the same window yesterday had calls, or one tick took >10 min wall. | `status` (lag, events ingested). Is the simulator up (`curl $SIM/sim/state`, compare `last_event_id` with `status --json` cursor)? If the sim is healthy: stop and re-run `./run.sh`. If it is still stalled, look at the controller log for ingest integrity errors. |
+| `apply_by_near` | An APPROVED change has 30 sim minutes or less before `apply_by` and is not applied: it lapses if missed. | `view --workflow W` (what we need). Look for `apply_withheld` / `apply_intent` decisions in `why --workflow W --from "Day N" --to "Day N"`. A withheld apply means the evidence went stale on purpose; otherwise check the controller is running at all. |
+| `credits_low` | Credits are below 25 x number of workflows (the incident reserve). | `status` for burn. Routine validation spend must already have stopped; if an incident is open, its validation may be unaffordable: decide whether to top up (outside our control) or accept the baseline prompt. |
+| `sim_5xx` | 3+ simulator 5xx in the last sim hour. | The controller backs off and re-reads `sim_minute` rather than re-advancing. Check the simulator process and its log. Persisting errors with a healthy sim: restart the controller. |
+| `fatigue_rejection` | The approver rejected a request for fatigue: **our request accounting is wrong**. | `why --workflow W` for the proposal and the 24 h ledger (governance). Do not file more requests until understood; this is a bug to fix. |
+| `http_403` | The simulator refused an auto-apply: a local policy pre-check is wrong. | `alerts` rows `proposal_invalid_locally` / `auto_apply_refused`, and the proposal in `why`. Bug to fix. |
+| `cohort_mismatch` | The cohort the sim assigned to a call differs from ours: per-cohort analysis is unreliable. | `view --workflow W`. Stop cohort-based changes until the cohort definitions are re-checked; the `cohort_check_skipped` alert is a weaker "could not check" signal. |
+
+### DIGEST (read in the morning)
+
+`judgement_rejection` (an approver said no, nothing changed; the planner re-plans), `starved_experiment` (an arm has
+under 100 connects after 2 days: it cannot conclude), `weak_base_did` (a number is simply weak, not a casualty of a
+probe), `kpi_drift` (pickup or engagement for the finished day is beyond |z| 3 of the hour-adjusted trailing 3-day
+level with no config change or incident that day: find out why before the next change).
+
+## 5. Corrupted or foreign database
+
+Symptoms: `status` / `view` prints `cannot open ... read-only`, `database disk image is malformed`, or the controller
+exits at startup with a SQLite error.
+
+1. Stop the controller. Copy the DB and its `-wal`/`-shm` files somewhere safe.
+2. Check: `python -c "import sqlite3;print(sqlite3.connect('state/X.db').execute('pragma integrity_check').fetchall())"`.
+3. A **foreign** DB (a different scenario or world): nothing to repair. The fingerprint in `meta` does not match the
+   simulator's first history line, so the controller archives it (`.old`) and starts a new one by itself.
+4. A **corrupted** DB: move it aside (`mv state/X.db state/X.db.corrupt`, also the `-wal`/`-shm`) and re-run
+   `./run.sh`. The controller re-ingests the whole history from the simulator's chunks (idempotent by `event_id`), then
+   reconciles proposals from `/approvals` and `/config/history` by `proposal_id`. What is lost: our `decisions` audit
+   rows, detector state (experiments restart as a new pending experiment with the current live config as control;
+   supervisor edits are never reverted) and the local error counters. The live configuration and approvals are in the
+   simulator and are untouched.
+
+## 6. Crash test and dev scenarios
+
+```
+python scripts/crash_test.py                            # public_02: kill at each fault point + 3 random kills; exit 0 iff invariants hold
+python scripts/crash_test.py --random-kills 5           # log: reports/crash_test.log
+bash scripts/dev_run.sh <name> <scenario.yaml> <report.md> [port]   # baseline + serve + controller + grade
+bash scripts/dev_run.sh null01 devscenarios/null_01.yaml reports/dev_null_01.md 8710
+bash scripts/dev_run.sh kyc_flag devscenarios/kyc_flag.yaml reports/dev_kyc_flag.md 8711
+bash scripts/dev_run.sh bad_default devscenarios/bad_default.yaml reports/dev_bad_default.md 8712
+python scripts/mc_null.py                               # Monte Carlo false-promotion rate of the experiment rule
+python -m pytest -q tests                               # full suite (a few minutes)
+```
+
+`dev_run.sh` writes the controller's state to `state/<name>` and logs to `runs/ctl_<name>.log`; use
+`python -m controller view --state-dir state/<name> --workflow W` afterwards.
