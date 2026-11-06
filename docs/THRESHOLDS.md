@@ -142,3 +142,12 @@ without a false-alarm rate that would drop healthy arms. `reports/mc_null.md` qu
 |---|---|---|---|
 | `DID_WEAK_PERSIST_DAYS` | 2 | A weak-base verdict (z <= -3.09 at comparable load, n >= 150) must hold on 2 distinct calendar days with no healthy evaluation in between. An earlier null_01 run produced a -2.2% DID-health rebalance from one false "weak" classification. | 3: a day slower on a truly weak DID. |
 | `DID_REBALANCE_MIN_HEALTH_GAIN` | 0 | The rebalance (no flagged DID involved) must have a non-negative expected health change: sum over DIDs of share x observed pickup ratio at comparable load x fatigue-curve health at the load the DID would carry. Moving traffic onto busier numbers can cost more than the measured ratio gain. Flagged-DID evacuations are measured pickup incidents and are never blocked by this check. | - |
+
+## Per-person call time (C4b, analysis only)
+
+| Name | Value | Derivation | Sensitivity |
+|---|---|---|---|
+| `PERSON_PRIOR_STRENGTH` | 20 pseudo-dials per block | PRIOR, not measured. The cohort's block pickup is estimated from thousands of dials, so it is far more certain than any one person; 20 pseudo-dials means a person needs about 20 dials in a block to move the estimate half-way. With the 4-dial minimum the data weight is <= 17% (mean about 10% on public_01/02). The same weight shrinks sparse cohort blocks to the cohort average. | 5: person data counts 4x as much, more persons qualify, and so does the null (selection grows with it). |
+| eligibility | >= 2 campaigns, >= 4 dials, >= 2 of 4 hour blocks | A returning person is the only one for whom a future call time can be chosen; one block gives no contrast between blocks. | - |
+| `PERSON_PASS_PROB` | 0.8 | Would-assign only if P(best block pickup > cohort average) >= 0.8, exact Beta tail. The best block is chosen on the posterior mean, so this is a best-of-4 selection: `reports/person_analysis.md` shows the rule qualifies 75-90% as many persons when no person effect exists. | 0.95: far fewer qualifiers, nearer the null floor of zero. |
+| decision | never a config change | `lead_preferred_hour` is x6 / x0.25 under fixed hourly capacity (CONTEXT section 3), and treated persons displace controls, so a person holdout is biased. The module imports no planner, governance or client code. | - |
