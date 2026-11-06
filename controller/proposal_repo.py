@@ -94,8 +94,16 @@ class ProposalRepo:
                 if p.route == ROUTE_APPROVAL]
 
     def next_plan_seq(self, workflow_id: str) -> int:
-        return self.conn.execute("SELECT COALESCE(MAX(plan_seq), 0) + 1 FROM proposals"
+        mine = self.conn.execute("SELECT COALESCE(MAX(plan_seq), 0) FROM proposals"
                                  " WHERE workflow_id=?", (workflow_id,)).fetchone()[0]
+        floor = int(self.store.get_meta(f"plan_seq_floor:{workflow_id}") or 0)
+        return max(mine, floor) + 1
+
+    def raise_plan_seq_floor(self, workflow_id: str, seq: int) -> None:
+        """Ids up to ``seq`` already exist in the sim (e.g. our state dir was lost): never reuse them."""
+        key = f"plan_seq_floor:{workflow_id}"
+        if seq > int(self.store.get_meta(key) or 0):
+            self.store.set_meta(key, str(seq))
 
     def count_recent_requests(self, workflow_id: str, now: int) -> int:
         """Fatigue ledger keyed on created_at (the sim's rule: created_minute > now - 24h).

@@ -100,6 +100,20 @@ class Governance:
             self.store.add_decision(now, "soft_cap_ignored", f"soft cap not honoured: {ignored}", wid)
         return filing_window_ok(now, gov, routine, wid, expires_in_hours)
 
+    def seed_plan_seqs(self) -> None:
+        """Startup: raise each workflow's plan_seq floor above every ``{wid}:{seq}:{kind}`` id the sim
+        already holds, so a lost state dir cannot make us collide with (and adopt) old approvals."""
+        try:
+            approvals = self.client.list_approvals()
+        except (c.SimUnavailable, c.OutcomeUnknown, c.NotFound) as exc:
+            log.warning("could not seed plan_seq from /approvals: %s", exc)
+            return
+        for ap in approvals:
+            wid, _, rest = str(ap.get("proposal_id", "")).partition(":")
+            seq = rest.partition(":")[0]
+            if wid in self.workflows and seq.isdigit():
+                self.repo.raise_plan_seq_floor(wid, int(seq))
+
     def _lookup_validation(self, run_id: str) -> dict | None:
         r = self.store.conn.execute("SELECT workflow_id, prompt_version, pass_rate FROM"
                                     " validation_runs WHERE run_id=?", (run_id,)).fetchone()
@@ -223,6 +237,12 @@ class Governance:
             self.alert(now, "error", "duplicate_without_approval",
                        f"{row.proposal_id}: sim says duplicate but no approval found", row.workflow_id)
             return self.repo.transition(row, SUBMIT_FAILED, now, "duplicate id, no approval")
+        if ap["base_version"] != row.base_version or sorted(ap.get("changed_dims") or []) != sorted(
+                row.body.get("dims") or []):
+            self.alert(now, "error", "proposal_id_collision",
+                       f"{row.proposal_id}: sim holds a different approval under this id; re-planning", row.workflow_id)
+            self.repo.raise_plan_seq_floor(row.workflow_id, row.plan_seq)
+            return self.repo.transition(row, STALE, now, "id collision with a foreign approval")
         return self._record_approval(row, ap, now)
 
     def _find_version(self, wid: str, proposal_id: str) -> int | None:
