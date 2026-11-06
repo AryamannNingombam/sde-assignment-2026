@@ -32,6 +32,11 @@ _MAX_ADVANCE_FAILURES = 5
 TICK_SLEEP_S = float(os.environ.get("CONTROLLER_TICK_SLEEP_S", "0"))
 
 
+class WorldRegressed(RuntimeError):
+    """The sim went backwards (it restarted as a new world): exit non-zero so run.sh restarts us and
+    ``open_world_store`` archives this DB and opens a fresh one."""
+
+
 @dataclass(frozen=True)
 class Windows:
     """Hour-granular activity windows read from ``GET /workflows``."""
@@ -151,10 +156,21 @@ class Controller:
             self.store.add_alert(now, "warn", "person_analysis_failed", f"{type(exc).__name__}: {exc}")
         phases["person_s"] = time.perf_counter() - t
 
+    def _check_world(self, state: dict) -> None:
+        """Mid-run regression check (startup does it in ``open_world_store``)."""
+        last_minute = self.store.get_meta("sim_minute")
+        cursor = self.store.get_cursor().last_event_id
+        if (last_minute is not None and state["sim_minute"] < int(last_minute))                 or cursor > state["last_event_id"]:
+            msg = (f"sim regressed mid-run: sim_minute {state['sim_minute']} < recorded {last_minute} or "
+                   f"last_event_id {state['last_event_id']} < cursor {cursor}; exiting for a fresh world")
+            self.store.add_alert(state["sim_minute"], "error", "world_regressed", msg)
+            raise WorldRegressed(msg)
+
     def tick(self) -> tuple[bool, IngestStats]:
         """One loop iteration. Returns ``(finished_and_drained, stats)``."""
         t0 = time.perf_counter()
         state = self._last_state = self.client.state()
+        self._check_world(state)
         note_progress(self.store, state)
         assert self.gov is not None
         now = state["sim_minute"]

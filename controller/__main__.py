@@ -11,11 +11,12 @@ from pathlib import Path
 
 from . import audit, settings
 from .client import SimClient, SimUnavailable
-from .loop import Controller
+from .loop import Controller, WorldRegressed
 from .store import Store
 from .world_id import open_world_store
 
 log = logging.getLogger("controller")
+EXIT_WORLD_REGRESSED = 4
 
 
 def _wait_for_sim(client: SimClient, timeout_s: float) -> None:
@@ -31,8 +32,16 @@ def _wait_for_sim(client: SimClient, timeout_s: float) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    try:
+        return _run(args)
+    except WorldRegressed as exc:
+        log.error("%s", exc)
+        return EXIT_WORLD_REGRESSED
+
+
+def _run(args: argparse.Namespace) -> int:
     client = SimClient(base_url=args.url)
-    _wait_for_sim(client, settings.STARTUP_WAIT_S)
+    _wait_for_sim(client, args.startup_wait if args.startup_wait is not None else settings.STARTUP_WAIT_S)
     store, world, fresh = open_world_store(client, args.state_dir)
     log.info("world %s fp=%s (%s db)", world.scenario, world.fingerprint[:8],
              "new" if fresh else "existing")
@@ -186,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run")
     run.add_argument("--url", required=True)
     run.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
+    run.add_argument("--startup-wait", type=float, default=float(os.environ["CONTROLLER_STARTUP_WAIT_S"])
+                     if os.environ.get("CONTROLLER_STARTUP_WAIT_S") else None,
+                     help="seconds to wait for the sim at startup (env CONTROLLER_STARTUP_WAIT_S)")
     run.add_argument("--until-minute", type=int, default=None,
                      help="dev: stop (exit 0) once sim_minute reaches this absolute minute")
     run.add_argument("--max-sim-minutes", type=int, default=None,

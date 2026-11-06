@@ -216,3 +216,23 @@ def test_status_cli(client, store, world, tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["calls"] > 0 and out["cursor"]["event_id"] == world.event_seq
     assert cli_main(["status", "--state-dir", str(tmp_path / "empty")]) == 1
+
+
+def test_sim_restart_mid_run_raises_world_regressed_and_alerts(client, store, world, monkeypatch):
+    from controller.loop import Controller, WorldRegressed
+    ctl = Controller(client, store)
+    ctl.startup()
+    for _ in range(3):
+        ctl.tick()
+    real = client.state
+    monkeypatch.setattr(client, "state", lambda: {**real(), "sim_minute": 0, "last_event_id": 0})
+    with pytest.raises(WorldRegressed):
+        ctl.tick()
+    assert store.conn.execute("select count(*) from alerts where code='world_regressed'").fetchone()[0] == 1
+
+
+def test_run_cli_exits_nonzero_on_world_regression(monkeypatch):
+    from controller import __main__ as m
+    from controller.loop import WorldRegressed
+    monkeypatch.setattr(m, "_run", lambda args: (_ for _ in ()).throw(WorldRegressed("x")))
+    assert m.cmd_run(None) == m.EXIT_WORLD_REGRESSED
