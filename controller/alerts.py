@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
-from . import cube, metrics, settings
+from . import cube, incidents, metrics, settings
 from .audit import fmt_minute
 from .store import Store
 
@@ -88,7 +88,7 @@ def credits_low(store: Store, credits: float | None) -> list[Alert]:
     if credits is None:
         return []
     n = max(1, len(_rows(store, "SELECT 1 FROM meta WHERE key LIKE 'workflow_policy:%'")))
-    reserve = settings.CREDIT_RESERVE_PER_WORKFLOW * n
+    reserve = incidents.reserve_per_workflow(incidents.initial_credits(store), n) * n
     if credits >= reserve:
         return []
     return [Alert("cond:credits_low", PAGE, "credits_low", None,

@@ -39,3 +39,9 @@ def note_once(store: Store, key: str, now: int) -> bool:
         return False
     store.conn.execute("INSERT OR REPLACE INTO detector_state(detector, key, value) VALUES ('note_once', ?, ?)", (key, day))
     return True
+
+
+def once_alert(store: Store, now: int, severity: str, code: str, message: str, wid: str | None) -> None:
+    """An alert that repeats every tick in a standing condition is written once per sim day per (code, workflow)."""
+    if note_once(store, f"alert:{code}:{wid}", now):
+        store.add_alert(now, severity, code, message, wid)

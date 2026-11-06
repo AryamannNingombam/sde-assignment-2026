@@ -14,7 +14,7 @@ from typing import Mapping
 
 from .. import settings
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, DesiredChange, PlanContext, Priority
-from ..incidents import can_spend, open_incidents, run_validation, validation_cost, validations_of
+from ..incidents import can_spend, initial_credits, open_incidents, run_validation, validation_cost, validations_of
 from ..stats import non_inferior, rate_greater_test, wilson_lower, wilson_upper
 from . import halluc_data as hd
 from .common import latest_config, load_state, save_state
@@ -53,7 +53,8 @@ def compare(live_runs: list[Mapping], sib_runs: list[Mapping], ceiling: float | 
 
 
 def _afford(ctx: PlanContext, cost: float) -> bool:
-    return can_spend(ctx.client.credits_remaining(), cost, len(ctx.workflows))
+    return can_spend(ctx.client.credits_remaining(), cost, len(ctx.workflows),
+                     credits_initial=initial_credits(ctx.store))
 
 
 def _best_run(runs: list[Mapping], min_pass: float) -> Mapping | None:

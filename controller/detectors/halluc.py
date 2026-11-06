@@ -16,12 +16,12 @@ from .. import settings
 from ..credits import call_with_credit_ledger
 from ..client import OutcomeUnknown, SimUnavailable
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, DesiredChange, PlanContext, Priority
-from ..incidents import (can_spend, close_incident, daily_cap_ok, open_incident, open_incidents, pick_validation_n,
+from ..incidents import (can_spend, close_incident, daily_cap_ok, initial_credits, open_incident, open_incidents, pick_validation_n,
                          recover_validations, run_validation, update_incident, validation_cost, validation_for,
                          validations_of)
 from ..stats import non_inferior, rate_greater_test, wilson_lower, wilson_upper
 from . import halluc_data as hd
-from .common import latest_config, load_state, save_state
+from .common import latest_config, load_state, once_alert, save_state
 
 log = logging.getLogger(__name__)
 KIND = "halluc"
@@ -130,7 +130,7 @@ def day0_validation(ctx: PlanContext) -> None:
             continue
         n = _day0_n(ctx, wid, len(todo))
         if n is None:
-            store.add_alert(ctx.now, "warn", "day0_validation_skipped", "credits cannot cover a minimum validation", wid)
+            once_alert(store, ctx.now, "warn", "day0_validation_skipped", "credits cannot cover a minimum validation", wid)
             continue
         store.set_job("halluc_day0", wid, ctx.now)  # one paid attempt, never a retry loop
         run_validation(ctx.client, store, wid, live, ctx.now, n)
@@ -167,7 +167,8 @@ def _confirm_day0(ctx: PlanContext, wid: str) -> None:
 
 # ------------------------------------------------------------------ fix selection
 def _spend_ok(ctx, wid: str, body: dict, cost: float) -> bool:
-    return (can_spend(ctx.client.credits_remaining(), cost, len(ctx.workflows), incident_spent=body["credits_spent"])
+    return (can_spend(ctx.client.credits_remaining(), cost, len(ctx.workflows), incident_spent=body["credits_spent"],
+                     credits_initial=initial_credits(ctx.store))
             and daily_cap_ok(ctx.store, wid, ctx.now, cost))
 
 
@@ -215,7 +216,7 @@ def _revert_is_clearly_better(counts: list, live_rate_lb: float | None) -> bool:
     return wilson_upper(counts[1], counts[0]) < live_rate_lb
 
 
-def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str) -> None:
+def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str, persist=None) -> None:
     """Fill ``body['candidates']`` / ``body['target']``: revert first; LLM only if none exists."""
     min_pass = _wf_min_pass(ctx.workflows[wid])
     tried = set(body["tried"])
@@ -232,37 +233,56 @@ def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str) 
                 cand.update({"flag_rate": round(_rate(counts), 5), "flag_n": counts[0]})
                 body["candidates"].append(cand)
                 break
+    if body.get("pending_suggestions"):  # a crash left paid suggestions unvalidated: finish them, never re-pay
+        _validate_suggestions(ctx, wid, body, live, min_pass)
     if not any(c["prompt"] not in tried and c["prompt"] != live for c in body["candidates"]) \
-            and not body["suggested"]:
-        _suggest(ctx, wid, body, live, min_pass)
+            and not body["suggested"] and _has_untried_option(ctx.workflows[wid], live, tried):
+        _suggest(ctx, wid, body, live, min_pass, persist)
     options = [c for c in body["candidates"] if c["prompt"] not in tried and c["prompt"] != live]
     body["target"] = options[0]["prompt"] if options else None
     if body["target"] is None:
-        ctx.store.add_alert(ctx.now, "error", "no_prompt_fix", "no validated fix available; incident stays open", wid)
+        once_alert(ctx.store, ctx.now, "error", "no_prompt_fix", "no validated fix available; incident stays open", wid)
 
 
-def _suggest(ctx: PlanContext, wid: str, body: dict, live: str, min_pass: float) -> None:
+def _has_untried_option(wf: Mapping, live: str, tried) -> bool:
+    """suggest-fixes only returns the workflow's own other prompt options, so with none left it buys nothing."""
+    options = (wf.get("options") or {}).get("prompt_version")
+    return options is None or any(p != live and p not in tried for p in options)
+
+
+def _suggest(ctx: PlanContext, wid: str, body: dict, live: str, min_pass: float, persist=None) -> None:
     if not _spend_ok(ctx, wid, body, settings.SUGGEST_FIXES_COST):
-        ctx.store.add_alert(ctx.now, "error", "suggest_fixes_unaffordable", "incident credit budget exhausted", wid)
+        once_alert(ctx.store, ctx.now, "error", "suggest_fixes_unaffordable", "incident credit budget exhausted", wid)
         return
     s = body["stats"]
     problem = (f"Hallucination flag rate {s.get('rate', 0):.1%} on prompt {live} "
                f"(baseline {s.get('base_rate', 0):.1%}, n={s.get('n', 0)}); need a safe replacement")
     body["suggested"] = True
     body["credits_spent"] += settings.SUGGEST_FIXES_COST
+    if persist:
+        persist()  # a crash during the paid call must not pay again on restart
     try:
         resp = call_with_credit_ledger(ctx.client, ctx.store, wid, ctx.now, "suggest-fixes",
                                        ctx.client.suggest_fixes, wid, problem)
     except (OutcomeUnknown, SimUnavailable):
         return
+    body["pending_suggestions"] = [sug["prompt_version"] for sug in resp.get("suggestions", [])]
+    if persist:
+        persist()  # the paid answer is durable before any validation is bought
+    _validate_suggestions(ctx, wid, body, live, min_pass)
+    if persist:
+        persist()
+
+
+def _validate_suggestions(ctx: PlanContext, wid: str, body: dict, live: str, min_pass: float) -> None:
     runs = []
-    for sug in resp.get("suggestions", []):
-        prompt = sug["prompt_version"]
+    for prompt in body.get("pending_suggestions", []):
         if prompt == live or prompt in body["tried"] or any(c["prompt"] == prompt for c in body["candidates"]):
             continue
         run = _validated(ctx, wid, prompt, body, 0.0)
         if run is not None:
             runs.append({"prompt": prompt, **run})
+    body["pending_suggestions"] = []
     for r in rank_by_failure_bound(runs, min_pass):
         body["candidates"].append(_candidate(r["prompt"], {"run_id": r["run_id"], "pass_rate": r["pass_rate"],
                                                            "n": r["n"]}, "llm") | {"fail_ub": r["fail_ub"]})
@@ -298,7 +318,7 @@ def _open(ctx, wid: str, st: dict, live: str, base_prompt, test: dict, kind: str
     inc_id = open_incident(ctx.store, wid, KIND, ctx.now, body)
     ctx.store.add_alert(ctx.now, "warn", "halluc_incident",
                         f"{kind}: {live} flags {test['rate']:.1%} vs {test['base_rate']:.1%} (n={test['n']}, p={test['p']:.1e})", wid)
-    prepare_fix(ctx, wid, body, st, live)
+    prepare_fix(ctx, wid, body, st, live, lambda: update_incident(ctx.store, inc_id, body))
     update_incident(ctx.store, inc_id, body)
 
 
@@ -414,7 +434,7 @@ def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
     hd.mark_bad(st, live, ctx.now, "verify_failed")
     hd.save(ctx.store, wid, st)
     ctx.store.add_decision(ctx.now, "incident_verify_failed", f"{live} did not verify; trying next candidate", wid, info)
-    prepare_fix(ctx, wid, body, st, live)
+    prepare_fix(ctx, wid, body, st, live, lambda: update_incident(ctx.store, inc["id"], body))
     update_incident(ctx.store, inc["id"], body)
 
 
@@ -423,7 +443,7 @@ def _manage(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
     if live == body["bad_prompt"]:
         _recheck(ctx, wid, inc, st, live)
         if body["target"] is None and not (body["suggested"] and body["reverts_checked"]):
-            prepare_fix(ctx, wid, body, st, live)
+            prepare_fix(ctx, wid, body, st, live, lambda: update_incident(ctx.store, inc["id"], body))
             update_incident(ctx.store, inc["id"], body)
     elif live == body["target"]:
         _verify(ctx, wid, inc, st, live)

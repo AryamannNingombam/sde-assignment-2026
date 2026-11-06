@@ -59,14 +59,29 @@ def close_incident(store: Store, incident_id: int, now: int, note: str) -> None:
 
 
 # ------------------------------------------------------------------ credit policy (R8)
-def can_spend(credits: float, cost: float, n_workflows: int, *, incident_spent: float | None = None) -> bool:
+def reserve_per_workflow(credits_initial: float | None, n_workflows: int) -> float:
+    """Incident reserve kept per workflow: the configured 25, but at most half the starting balance split over
+    the workflows, so a many-workflow fleet on a small budget can still afford routine checks (docs/THRESHOLDS.md)."""
+    base = settings.CREDIT_RESERVE_PER_WORKFLOW
+    if not credits_initial or n_workflows <= 0:
+        return base
+    return min(base, credits_initial / (2 * n_workflows))
+
+
+def initial_credits(store: Store) -> float | None:
+    raw = store.get_meta("credits_initial")
+    return float(raw) if raw is not None else None
+
+
+def can_spend(credits: float, cost: float, n_workflows: int, *, incident_spent: float | None = None,
+              credits_initial: float | None = None) -> bool:
     """Routine spend (``incident_spent is None``) must leave the full incident reserve of every
     workflow untouched. Incident spend may use the reserve but one incident spends at most
     ``INCIDENT_CREDIT_CAP`` and never more than we have (so the sim can never answer 402)."""
     if cost > credits + 1e-9:
         return False
     if incident_spent is None:
-        return credits - cost >= settings.CREDIT_RESERVE_PER_WORKFLOW * n_workflows - 1e-9
+        return credits - cost >= reserve_per_workflow(credits_initial, n_workflows) * n_workflows - 1e-9
     return incident_spent + cost <= settings.INCIDENT_CREDIT_CAP + 1e-9
 
 
