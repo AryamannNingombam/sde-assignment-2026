@@ -26,7 +26,7 @@ from .desired import DEFAULT_REGISTRY, ROUTE_AUTO, DesiredChange, PlanContext, P
 from .governance import Governance
 from .proposal_repo import ROUTE_APPROVAL as ROW_APPROVAL
 from .proposal_repo import ROUTE_AUTO as ROW_AUTO
-from .proposal_repo import SUBMIT_FAILED, ProposalRow
+from .proposal_repo import SUBMIT_FAILED, ProposalRepo, ProposalRow
 from .proposals import ProposalDraft, build_draft
 from .store import Store
 
@@ -47,7 +47,7 @@ class Planner:
         if not (last is None or last // DAY < now // DAY):
             return False
         # a kill between submit and job_mark must not allow a second bundle: the row is the proof
-        return not (name == settings.JOB_DAILY_BUNDLE and self.gov.repo.routine_bundle_on_day(
+        return not (name == settings.JOB_DAILY_BUNDLE and ProposalRepo(self.store).routine_bundle_on_day(
             wid, now // DAY, int(Priority.ROUTINE)))
 
     def job_mark(self, name: str, wid: str, now: int) -> None:
