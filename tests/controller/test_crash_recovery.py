@@ -196,3 +196,26 @@ def test_startup_reconcile_handles_pending_and_approved(client, store, world):
     assert run_until(ctl2, lambda: any(s in (pr.APPLIED, pr.MONITORING, pr.REJECTED)
                                        for s in proposal_states(store2).values()))
     assert sim_kinds(world).count("approval_applied") <= 1 and not BAD & set(sim_kinds(world))
+
+
+def test_kill_between_submit_and_job_mark_makes_at_most_one_routine_bundle_per_day(client, store, world, monkeypatch):
+    ctl = make_controller(client, store, uniform_hours())
+    real_mark = ctl.planner.job_mark
+
+    def die(*a, **k):
+        raise SimulatedCrash("killed after submit, before job_mark")
+
+    monkeypatch.setattr(ctl.planner, "job_mark", die)
+    with pytest.raises(SimulatedCrash):
+        run_until(ctl, lambda: False)
+    assert len(world.approvals) == 1
+    ctl2, store2 = restart(client, store, uniform_hours())  # fresh process: no job mark persisted
+    assert store2.get_job("daily_bundle", "nw_renewal") is None
+    now = client.state()["sim_minute"]
+    assert not ctl2.planner.job_due("daily_bundle", "nw_renewal", now)  # the INTENT/PENDING row spent it
+    day = now // 1440
+    for _ in range(400):  # still the same sim day: more ticks must not file a second routine bundle
+        if client.state()["sim_minute"] // 1440 != day:
+            break
+        ctl2.tick()
+    assert len([a for a in world.approvals.values() if a["created_minute"] // 1440 == day]) == 1

@@ -44,7 +44,11 @@ class Planner:
     # ------------------------------------------------------------ scheduled jobs
     def job_due(self, name: str, wid: str, now: int) -> bool:
         last = self.store.get_job(name, wid)
-        return last is None or last // DAY < now // DAY
+        if not (last is None or last // DAY < now // DAY):
+            return False
+        # a kill between submit and job_mark must not allow a second bundle: the row is the proof
+        return not (name == settings.JOB_DAILY_BUNDLE and self.gov.repo.routine_bundle_on_day(
+            wid, now // DAY, int(Priority.ROUTINE)))
 
     def job_mark(self, name: str, wid: str, now: int) -> None:
         self.store.set_job(name, wid, now)

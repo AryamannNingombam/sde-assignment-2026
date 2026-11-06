@@ -109,6 +109,16 @@ class ProposalRepo:
             "  (filed_minute IS NULL AND state='INTENT' AND created_minute > ?))",
             (workflow_id, since, since)).fetchone()[0]
 
+    def routine_bundle_on_day(self, workflow_id: str, day: int, routine_priority: int) -> bool:
+        """Has a routine approval-route proposal (any state but SUBMIT_FAILED, INTENT included) been
+        created on this sim day? That row, not the separate job mark, is the proof the bundle is spent."""
+        r = self.conn.execute(
+            "SELECT 1 FROM proposals WHERE workflow_id=? AND route='approval' AND priority>=? AND"
+            " state!='SUBMIT_FAILED' AND created_minute>=? AND created_minute<? LIMIT 1",
+            (workflow_id, routine_priority, day * settings.MINUTES_PER_DAY,
+             (day + 1) * settings.MINUTES_PER_DAY)).fetchone()
+        return r is not None
+
     def last_auto_minute(self, workflow_id: str) -> int | None:
         r = self.conn.execute("SELECT MAX(applied_minute) FROM proposals WHERE workflow_id=? AND"
                               " route='auto' AND applied_minute IS NOT NULL", (workflow_id,)).fetchone()
