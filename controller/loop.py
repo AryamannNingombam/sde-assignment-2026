@@ -22,7 +22,7 @@ from .alerts import TickObserver
 from .governance import Governance
 from .planner import Planner
 from .ingest import IngestStats, Ingestor, mirror_configs
-from . import metrics
+from . import metrics, person_analysis
 from .store import Store
 from .world_id import note_progress
 
@@ -141,6 +141,16 @@ class Controller:
         if phases is not None:
             phases["detect_s"], phases["plan_s"] = t2 - t, time.perf_counter() - t2
 
+    def run_person_analysis(self, now: int, phases: dict[str, float]) -> None:
+        """Daily per-person call-time analysis (flag-gated, ANALYSIS ONLY): never proposes, never raises."""
+        t = time.perf_counter()
+        try:
+            person_analysis.maybe_run_daily(self.store, now)
+        except Exception as exc:  # noqa: BLE001  (an analysis bug must not stop the loop)
+            log.exception("person analysis failed")
+            self.store.add_alert(now, "warn", "person_analysis_failed", f"{type(exc).__name__}: {exc}")
+        phases["person_s"] = time.perf_counter() - t
+
     def tick(self) -> tuple[bool, IngestStats]:
         """One loop iteration. Returns ``(finished_and_drained, stats)``."""
         t0 = time.perf_counter()
@@ -161,6 +171,7 @@ class Controller:
             self.gov.apply_approved(now)
             ph["apply_s"] = time.perf_counter() - t
             self.plan_and_submit(now, ph)
+            self.run_person_analysis(now, ph)
         self._phases = ph
         hit_stop = self.stop_at_minute is not None and state["sim_minute"] >= self.stop_at_minute
         step = 0
