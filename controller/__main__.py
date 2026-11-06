@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -38,7 +39,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     stop = args.until_minute
     if args.max_sim_minutes is not None:
         stop = client.state()["sim_minute"] + args.max_sim_minutes
-    result = Controller(client, store, stop_at_minute=stop).run()
+    profile_out = os.environ.get("CONTROLLER_PROFILE")  # dev knob: cProfile the whole run to this file
+    if profile_out:
+        import cProfile
+        prof = cProfile.Profile()
+        try:
+            result = prof.runcall(Controller(client, store, stop_at_minute=stop).run)
+        finally:
+            prof.dump_stats(profile_out)
+    else:
+        result = Controller(client, store, stop_at_minute=stop).run()
     log.info("done: finished=%s ticks=%d sim_minute=%d events=%d", result.finished,
              result.ticks, result.sim_minute, result.stats.events)
     if not result.finished and stop is None:

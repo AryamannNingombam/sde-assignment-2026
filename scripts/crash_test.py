@@ -35,9 +35,12 @@ from controller.faults import CRASH_EXIT_CODE, POINTS  # noqa: E402  (dev toolin
 
 # n-th hit of each point inside one controller process; spread so the points hit different moments
 # Several hits per point: later hits land on later proposals (experiment entries/updates, DID probes, incident fixes).
-POINT_HITS = {"mid-ingest-txn": [3, 150], "after-advance-before-ingest": [40, 200],
-              "after-submit-before-record": [1, 2, 3, 5], "after-apply-before-record": [1, 2, 3],
-              "after-credit-call-before-record": [1, 2]}
+# Order matters: the credit point needs the Day 3 hallucination incident, so it goes first and the rest fire after it.
+POINT_ORDER = ["after-credit-call-before-record", "mid-ingest-txn", "after-submit-before-record",
+               "after-apply-before-record", "after-advance-before-ingest"]
+POINT_HITS = {"mid-ingest-txn": [3, 30], "after-advance-before-ingest": [40],
+              "after-submit-before-record": [1, 2], "after-apply-before-record": [1, 2],
+              "after-credit-call-before-record": [1, 4]}
 TERMINAL_OK = {"APPLIED": {"applied"}, "MONITORING": {"applied"}, "CLOSED": {"applied", "rejected", "expired"},
                "AUTO_APPLIED": set(), "REJECTED": {"rejected"}, "EXPIRED": {"expired"},
                "STALE": {"approved", "pending", "rejected", "expired", "applied"},
@@ -63,8 +66,11 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+TICK_SLEEP_S = "0"
+
+
 def py_env(extra: dict | None = None) -> dict:
-    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "CONTROLLER_TICK_SLEEP_S": TICK_SLEEP_S}
     env.pop("CRASH_AT", None)
     env.update(extra or {})
     return env
@@ -272,13 +278,17 @@ def main() -> int:
     ap.add_argument("--random-kills", type=int, default=10)
     ap.add_argument("--points", nargs="*", default=list(POINTS))
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--kill-min-s", type=float, default=4)
-    ap.add_argument("--kill-max-s", type=float, default=14)
+    ap.add_argument("--kill-min-s", type=float, default=2.5)
+    ap.add_argument("--kill-max-s", type=float, default=7)
+    ap.add_argument("--tick-sleep-s", type=float, default=0.3,
+                    help="slow the controller loop (test knob) so kills land at many sim moments")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--work-dir", default=None, help="default runs/crash_<scenario>")
     ap.add_argument("--log", default=str(ROOT / "reports" / "crash_test.log"))
     ap.add_argument("--point-timeout-s", type=float, default=900)
     args = ap.parse_args()
+    global TICK_SLEEP_S
+    TICK_SLEEP_S = str(args.tick_sleep_s)
 
     name = Path(args.scenario).stem
     work = Path(args.work_dir) if args.work_dir else ROOT / "runs" / f"crash_{name}"
@@ -305,7 +315,7 @@ def main() -> int:
         log("simulator up")
         runner = Runner(url, state_dir, log, args.point_timeout_s)
         rng = random.Random(args.seed)
-        for point in args.points:
+        for point in sorted(args.points, key=lambda p: POINT_ORDER.index(p) if p in POINT_ORDER else 99):
             for hits in POINT_HITS.get(point, [1]):
                 runner.run_fault(point, hits)
         for _ in range(args.random_kills):

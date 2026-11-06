@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -27,6 +28,8 @@ from .world_id import note_progress
 
 log = logging.getLogger(__name__)
 _MAX_ADVANCE_FAILURES = 5
+# Test knob (crash_test.py): slow the loop so a kill lands at many different sim moments. 0 in production.
+TICK_SLEEP_S = float(os.environ.get("CONTROLLER_TICK_SLEEP_S", "0"))
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,8 @@ class Controller:
                 continue
             failures = 0
             ticks += 1
+            if TICK_SLEEP_S:
+                time.sleep(TICK_SLEEP_S)
             total += stats
             if done:
                 final = self.client.state()  # one read for both fields
