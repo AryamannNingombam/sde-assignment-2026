@@ -90,7 +90,10 @@ DID_EVAL_MIN_DIALS_ACTIVE = 1  # evaluate only when the window has dials
 
 # --- C8 hallucination incidents ---------------------------------------------------------
 HALLUC_VALIDATION_N = 300
-HALLUC_P = 0.001
+# CONTEXT C8 says p < 0.001; the segment test is re-run every tick (and on a rolling day for drift), so the
+# per-look levels are tightened: 1e-4 for a fresh prompt segment, 1e-5 for same-prompt drift vs history.
+HALLUC_P = 1e-4
+HALLUC_P_DRIFT = 1e-5
 HALLUC_MIN_CONNECTS = 200
 HALLUC_ADHERENCE_DROP = 0.02
 HALLUC_WINDOW_MINUTES = 1440  # rolling window for drift

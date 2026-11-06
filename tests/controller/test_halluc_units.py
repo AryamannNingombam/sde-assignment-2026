@@ -29,11 +29,17 @@ def test_segment_test_needs_min_connects_and_ignores_noise():
 
 def test_adherence_drop_corroborates_a_borderline_rate():
     base = [14000, 206, 14000 * 0.93, 7000]
-    seg = [220, 8, 220 * 0.89, 100]  # 3.6%: p between 0.001 and 0.01
+    seg = [220, 9, 220 * 0.89, 100]  # 4.1%: p between 1e-4 and 1e-3
     t = hl.segment_test(seg, base)
-    assert 0.001 <= t["p"] < 0.01 and t["triggered"]
-    seg_no_adh = [220, 8, 220 * 0.93, 100]
+    assert 1e-4 <= t["p"] < 1e-3 and t["triggered"]
+    seg_no_adh = [220, 9, 220 * 0.93, 100]
     assert not hl.segment_test(seg_no_adh, base)["triggered"]
+
+
+def test_drift_uses_a_stricter_level():
+    base = [13000, 170, 12000.0, 7000]
+    seg = [1000, 27, 930.0, 500]  # 2.7% vs 1.3%: p ~ 3e-4, an unlucky day, not an incident
+    assert not hl.segment_test(seg, base, settings.HALLUC_P_DRIFT)["triggered"]
 
 
 def test_engagement_guardrail():

@@ -45,7 +45,7 @@ def _max_engagement_drop(wf: Mapping) -> float:
 
 
 # ------------------------------------------------------------------ the statistical test
-def segment_test(seg: list, base: list) -> dict:
+def segment_test(seg: list, base: list, alpha: float = settings.HALLUC_P) -> dict:
     """Is the segment's flag rate above the baseline's? (one-sided two-proportion test)."""
     z, p = two_prop_z(seg[1], seg[0], base[1], base[0], alternative="greater")
     seg_adh = seg[2] / seg[0] if seg[0] else 0.0
@@ -53,7 +53,7 @@ def segment_test(seg: list, base: list) -> dict:
     adh_drop = base_adh - seg_adh
     corroborated = adh_drop >= settings.HALLUC_ADHERENCE_DROP
     triggered = seg[0] >= settings.HALLUC_MIN_CONNECTS and (
-        p < settings.HALLUC_P or (p < 10 * settings.HALLUC_P and corroborated))
+        p < alpha or (p < 10 * alpha and corroborated))
     return {"n": seg[0], "flags": seg[1], "rate": _rate(seg), "base_n": base[0], "base_rate": _rate(base),
             "z": round(z, 3), "p": p, "adherence_drop": round(adh_drop, 4), "corroborated": corroborated,
             "triggered": triggered}
@@ -221,7 +221,8 @@ def _detect(ctx: PlanContext, wid: str, st: dict, live: str) -> None:
     base, base_prompt, source = _baseline(st, live)
     if base is None:
         return
-    test = segment_test(hd.window_counts(st, ctx.now), base)
+    alpha = settings.HALLUC_P_DRIFT if base_prompt == live else settings.HALLUC_P
+    test = segment_test(hd.window_counts(st, ctx.now), base, alpha)
     test["baseline_source"] = source
     if ctx.now % 60 < settings.TICK_MINUTES:  # hourly audit row
         ctx.store.add_decision(ctx.now, "halluc_eval", f"{live}: flags {test['rate']:.2%} vs {test['base_rate']:.2%}"

@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 
+from controller.desired import Registry
 from controller import cube, settings
 from controller.client import AdvanceNotApplied, SimClient
 from controller.ingest import Ingestor, mirror_configs, ts_to_minute
@@ -149,7 +150,7 @@ def test_windows_and_adaptive_step():
 
 
 def test_run_to_finish_integration(client, store, world):
-    ctl = Controller(client, store)
+    ctl = Controller(client, store, registry=Registry())
     result = ctl.run()
     assert result.finished and result.ticks > 0
     assert client.state()["finished"]
@@ -165,11 +166,11 @@ def test_run_to_finish_integration(client, store, world):
 
 
 def test_stop_at_minute_and_restart_resume(client, store, world):
-    Controller(client, store, stop_at_minute=600).run()
+    Controller(client, store, stop_at_minute=600, registry=Registry()).run()
     assert 600 <= client.state()["sim_minute"] < 700 and not client.state()["finished"]
     store.close()
     store2 = Store(store.path)
-    result = Controller(client, store2).run()  # a "restart": resumes from SQLite
+    result = Controller(client, store2, registry=Registry()).run()  # a "restart": resumes from SQLite
     assert result.finished
     assert store2.get_cursor().last_event_id == world.event_seq
     assert store2.count("calls") == store2.conn.execute("select sum(dials) from cube").fetchone()[0]
@@ -204,12 +205,12 @@ def test_controller_gives_up_after_repeated_advance_failures(client, store, monk
     monkeypatch.setattr(client, "advance", fail)
     monkeypatch.setattr("controller.loop.time.sleep", lambda s: None)
     with pytest.raises(AdvanceNotApplied):
-        Controller(client, store).run()
+        Controller(client, store, registry=Registry()).run()
     assert store.conn.execute("select count(*) from alerts where code='advance_failed'").fetchone()[0] == 5
 
 
 def test_status_cli(client, store, world, tmp_path, capsys):
-    Controller(client, store, stop_at_minute=0).run()
+    Controller(client, store, stop_at_minute=0, registry=Registry()).run()
     store.close()
     assert cli_main(["status", "--state-dir", str(store.path.parent)]) == 0
     out = json.loads(capsys.readouterr().out)

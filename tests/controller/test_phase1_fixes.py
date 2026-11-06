@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import sim.server
+from controller.desired import Registry
 from controller import client as c
 from controller import settings
 from controller.ingest import IngestIntegrityError, Ingestor, mirror_configs, ts_to_minute
@@ -241,12 +242,12 @@ def test_finished_from_advance_is_reported(client, store, monkeypatch):
         raise c.Finished(409, "finished", {})
 
     monkeypatch.setattr(client, "advance", finished)
-    result = Controller(client, store, stop_at_minute=None).run()
+    result = Controller(client, store, stop_at_minute=None, registry=Registry()).run()
     assert result.finished and result.ticks == 1
 
 
 def test_lag_metric_is_non_negative_and_small(client, store):
-    Controller(client, store, stop_at_minute=30).run()
+    Controller(client, store, stop_at_minute=30, registry=Registry()).run()
     lags = [r[0] for r in store.conn.execute("select lag_s from metrics")]
     assert lags and all(0 <= lag < 60 for lag in lags)
 
