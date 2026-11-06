@@ -46,6 +46,7 @@ class Governance:
         self._live_cache: dict[str, tuple[int, dict]] = {}
         self._noted: dict[str, int] = {}
         self._skip_apply: set[str] = set()  # workflows whose /apply outcome is unknown this tick
+        self.veto_check = None  # optional (row, now) -> reason: withhold /apply because the evidence went stale
 
     # ------------------------------------------------------------ helpers
     def live(self, wid: str) -> tuple[int, dict]:
@@ -344,6 +345,10 @@ class Governance:
                 self.repo.transition(row, LAPSED, now, "apply_by passed; not applied")
             elif self.live(row.workflow_id)[0] != row.base_version:
                 self.repo.transition(row, STALE, now, "base version changed; /apply NOT called")
+            elif (reason := self.veto_check(row, now) if self.veto_check else None):
+                self.store.add_decision(now, "apply_withheld", f"{row.proposal_id}: /apply NOT called: {reason}",
+                                        row.workflow_id, {"proposal_id": row.proposal_id, "reason": reason})
+                self.repo.transition(row, SUPERSEDED, now, f"withheld at apply time: {reason}")
             else:
                 applied = self._apply(row, now)
                 if applied is not None:

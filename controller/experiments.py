@@ -16,7 +16,7 @@ import json
 import logging
 from typing import Mapping
 
-from . import exp_alloc, exp_data, exp_decay, exp_proposals as prop, exp_rules as er, exp_state as xs, settings
+from . import exp_alloc, exp_data, exp_decay, exp_stats as es, exp_proposals as prop, exp_rules as er, exp_state as xs, settings
 from .cohorts import VOCAB_META_KEY, FeatureVocab
 from .desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from .detectors.common import latest_config
@@ -219,6 +219,7 @@ def _conclude(ctx, st, wid, dim, why: str) -> None:
 
 
 def _promote(ctx, st, wid, dim, winner, scope, rec, group) -> None:
+    st["pre_promo"] = {"shares": dict(st["shares"]), "arms": {a: dict(v) for a, v in st["arms"].items()}}
     weights = exp_alloc.promotion_weights(winner, st["control"])
     cohort_weights = {}
     if group:
@@ -268,7 +269,8 @@ def _decay_check(ctx, st, wid, dim) -> None:
     cells = promo.get("cells")
     ref, pooled = exp_decay.reference_rates(ctx.store, wid, dim, promo["old_control"], since // DAY - 1, cells)
     blocks = exp_decay.winner_blocks(ctx.store, wid, dim, promo["winner"], since, ref, pooled, cells)
-    cus = exp_decay.cusum(blocks)
+    level = exp_decay.pre_promotion_level(ctx.store, wid, dim, promo["winner"], st["start_minute"] or 0, since, ref, pooled, cells)
+    cus = exp_decay.cusum(blocks, level)
     held = exp_decay.holdout_view(ctx.store, wid, dim, promo["winner"], promo["old_control"], since, ctx.now, cells)
     roll, why = exp_decay.decide(cus, held)
     status = {"cusum": cus, "holdout": held, "rollback": roll}
@@ -337,6 +339,38 @@ def experiments_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
     return out
 
 
+def experiments_veto(ctx: PlanContext, wid: str, kind: str) -> str | None:
+    """Apply-time re-check of an approved promotion: the evidence is a day old by the time it is applied.
+
+    A promotion is withheld (never applied, so no lapse is logged) if the winner's lift over the last 24 h, now
+    including the approval latency, is no longer positive. The experiment resumes where it was.
+    """
+    if not settings.ENABLE_EXPERIMENTS or not kind.startswith("experiment"):
+        return None
+    for dim in xs.DIMS:
+        st = xs.load(ctx.store, wid, dim)
+        d = st.get("desired") if st else None
+        if not d or d["kind"] != "experiment_promote" or not st.get("start_minute"):
+            continue
+        promo = st["promo"]
+        data = exp_data.load_arms(ctx.store, wid, dim, st["start_minute"], ctx.now, promo.get("cells"))
+        c = es.contrast(data.get(promo["winner"], er.EMPTY).recent, data.get(st["control"], er.EMPTY).recent)
+        if c is not None and c.lift > 0:
+            continue
+        reason = (f"{dim}: before applying, the winner {promo['winner']}'s last-24h lift over {st['control']} is "
+                  f"{'unmeasurable' if c is None else format(c.lift, '+.1%')}: it may be decaying; promotion withdrawn")
+        st["desired"], st["phase"] = None, xs.RUNNING
+        st["shares"], st["arms"] = st["pre_promo"]["shares"], st["pre_promo"]["arms"]
+        st.setdefault("withdrawn", []).append({"winner": promo["winner"], "minute": ctx.now})
+        st.pop("promo", None)
+        xs.save(ctx.store, wid, dim, st)
+        ctx.store.add_decision(ctx.now, "experiment_promotion_withdrawn", reason, wid,
+                               {"dim": dim, "winner": promo["winner"], "recent_lift": None if c is None else c.lift})
+        return reason
+    return None
+
+
 def register(registry=DEFAULT_REGISTRY) -> None:
     registry.register_detector(experiments_detector)
     registry.register_producer(experiments_producer)
+    registry.register_veto(experiments_veto)

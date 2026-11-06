@@ -2,7 +2,7 @@
 
 The winner carries ~90% of traffic, so its own level is high-powered. Its engagement is adjusted for the hour x cell
 mix of the calls it received (expected rate per (hour, cell) from the old control's pre-promotion cube history,
-shrunk toward the pooled rate), then compared with its own level over the first blocks after promotion. The 10%
+shrunk toward the pooled rate), then compared with its own level before promotion (or, if thin, its first blocks after). The 10%
 holdout on the old control is the directional confirmation (and a second, direct significance route).
 """
 from __future__ import annotations
@@ -28,21 +28,30 @@ def reference_rates(store, wid: str, dim: str, control: str, day_max: int,
     return {r.key: (r.engaged + m * pooled) / (r.connects + m) for r in rows}, pooled
 
 
-def winner_blocks(store, wid: str, dim: str, winner: str, since: int, ref: dict, pooled: float,
-                  cells: Sequence[int] | None = None) -> list[Block]:
-    """Winner connects after ``since`` in event order, cut into blocks of EXP_CUSUM_BLOCK connects."""
+def _winner_rows(store, wid: str, dim: str, winner: str, since: int, until: int | None, ref: dict, pooled: float,
+                 cells: Sequence[int] | None):
+    """(expected p, engaged) of each winner connect in [since, until), in event order."""
     col = exp_data.column(dim)
     sql = (f"SELECT c.hour, l.cell, c.engaged FROM calls c JOIN leads l ON l.lid=c.lid WHERE c.workflow_id=?"
            f" AND c.day>=? AND c.ts_minute>=? AND c.connected=1 AND c.{col}=?")
     args: list = [wid, since // DAY, since, winner]
+    if until is not None:
+        sql += " AND c.ts_minute<?"
+        args.append(until)
     if cells is not None:
         sql += f" AND l.cell IN ({','.join('?' * len(cells))})" if cells else " AND 0"
         args += list(cells)
     sql += " ORDER BY c.event_id"
+    for hour, cell, engaged in store.conn.execute(sql, args):
+        yield ref.get((hour, cell), pooled), engaged
+
+
+def winner_blocks(store, wid: str, dim: str, winner: str, since: int, ref: dict, pooled: float,
+                  cells: Sequence[int] | None = None) -> list[Block]:
+    """Winner connects after ``since`` cut into blocks of EXP_CUSUM_BLOCK connects."""
     blocks: list[Block] = []
     n = x = e = v = 0.0
-    for hour, cell, engaged in store.conn.execute(sql, args):
-        p = ref.get((hour, cell), pooled)
+    for p, engaged in _winner_rows(store, wid, dim, winner, since, None, ref, pooled, cells):
         n, x, e, v = n + 1, x + engaged, e + p, v + p * (1 - p)
         if n >= settings.EXP_CUSUM_BLOCK:
             blocks.append((n, x, e, v))
@@ -50,15 +59,32 @@ def winner_blocks(store, wid: str, dim: str, winner: str, since: int, ref: dict,
     return blocks
 
 
-def cusum(blocks: Sequence[Block]) -> dict:
-    """One-sided CUSUM for a DROP of the composition-adjusted ratio against the first reference blocks."""
-    k_ref = settings.EXP_CUSUM_REF_BLOCKS
-    out = {"blocks": len(blocks), "alarm": False, "S": 0.0, "ref_ratio": None, "last_ratio": None}
+def pre_promotion_level(store, wid: str, dim: str, winner: str, start: int, applied: int, ref: dict, pooled: float,
+                        cells: Sequence[int] | None = None) -> Block | None:
+    """The winner's own composition-adjusted level over its last 48 h of experiment exposure (None if too thin)."""
+    lo = max(start, applied - 2 * DAY)
+    n = x = e = v = 0.0
+    for p, engaged in _winner_rows(store, wid, dim, winner, lo, applied, ref, pooled, cells):
+        n, x, e, v = n + 1, x + engaged, e + p, v + p * (1 - p)
+    return (n, x, e, v) if n >= settings.EXP_CUSUM_BLOCK else None
+
+
+def cusum(blocks: Sequence[Block], reference: Block | None = None) -> dict:
+    """One-sided CUSUM for a DROP of the composition-adjusted ratio.
+
+    The reference is the winner's own level just BEFORE promotion when it has enough data (a decay that is already
+    under way when the winner goes live would otherwise be baked into the reference), else its first blocks after.
+    """
+    k_ref = 0 if reference else settings.EXP_CUSUM_REF_BLOCKS
+    out = {"blocks": len(blocks), "alarm": False, "S": 0.0, "ref_ratio": None, "last_ratio": None,
+           "reference": "pre-promotion 48h" if reference else f"first {k_ref} blocks"}
     if len(blocks) <= k_ref:
         return out
-    x0, e0 = sum(b[1] for b in blocks[:k_ref]), sum(b[2] for b in blocks[:k_ref])
-    se0 = math.sqrt(sum(b[3] for b in blocks[:k_ref])) / e0
-    r0 = x0 / e0
+    ref = reference or (sum(b[0] for b in blocks[:k_ref]), sum(b[1] for b in blocks[:k_ref]),
+                        sum(b[2] for b in blocks[:k_ref]), sum(b[3] for b in blocks[:k_ref]))
+    e0 = ref[2]
+    se0 = math.sqrt(ref[3]) / e0
+    r0 = ref[1] / e0
     s, first_alarm = 0.0, None
     for i, (_, x, e, v) in enumerate(blocks[k_ref:], start=k_ref):
         r, se = x / e, math.sqrt(v) / e

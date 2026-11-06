@@ -58,12 +58,14 @@ class PlanContext:
 
 Producer = Callable[[PlanContext, str], Iterable[DesiredChange]]
 Detector = Callable[[PlanContext], None]
+Veto = Callable[[PlanContext, str, str], "str | None"]  # (ctx, workflow_id, proposal_kind) -> reason to withhold /apply
 
 
 class Registry:
     def __init__(self) -> None:
         self.producers: list[Producer] = []
         self.detectors: list[Detector] = []
+        self.vetoes: list[Veto] = []
 
     def register_producer(self, fn: Producer) -> Producer:
         self.producers.append(fn)
@@ -73,9 +75,22 @@ class Registry:
         self.detectors.append(fn)
         return fn
 
+    def register_veto(self, fn: Veto) -> Veto:
+        self.vetoes.append(fn)
+        return fn
+
+    def veto(self, ctx: PlanContext, workflow_id: str, kind: str) -> str | None:
+        """First reason any producer gives to withhold applying an approved change (the evidence went stale)."""
+        for fn in self.vetoes:
+            reason = fn(ctx, workflow_id, kind)
+            if reason:
+                return reason
+        return None
+
     def clear(self) -> None:
         self.producers.clear()
         self.detectors.clear()
+        self.vetoes.clear()
 
     def run_detectors(self, ctx: PlanContext) -> None:
         for detector in self.detectors:

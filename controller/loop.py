@@ -108,6 +108,7 @@ class Controller:
         mirror_configs(self.client, self.store, self._workflow_ids)
         self.gov = Governance(self.client, self.store, {w["workflow_id"]: w for w in workflows})
         self.planner = Planner(self.client, self.store, self.gov, self.registry)
+        self.gov.veto_check = lambda row, now: self.registry.veto(self.planner.context(now), row.workflow_id, row.kind)
         self.gov.reconcile(state["sim_minute"])  # resolve anything a previous run left in flight
         stats = self.ingestor.sync()
         self.store.add_decision(state["sim_minute"], "startup",

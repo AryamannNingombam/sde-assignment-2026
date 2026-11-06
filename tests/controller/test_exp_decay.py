@@ -44,3 +44,23 @@ def test_desired_matching_and_patch_shape():
     p = xs.desired_patch("voice", {"weights": {"V1": 1.0}, "cohort_weights": {"c1": {"V2": 0.9, "V1": 0.1}}})
     assert p["allocations"]["c1"]["voice"] == {"V2": 0.9, "V1": 0.1} and p["allocations"]["default"]["voice"] == {"V1": 1.0}
     assert xs.top_option({"V1": 0.5, "V2": 0.5}) == "V1" and xs.top_option({"V1": 0.2, "V3": 0.8}) == "V3"
+
+
+def test_pre_promotion_reference_catches_a_decay_that_was_already_under_way():
+    # level before promotion 1.10; the winner goes live already at ~1.0: relative to its first post blocks nothing changes
+    flat_after = blocks([1.0] * 10)
+    assert not xd.cusum(flat_after)["alarm"]
+    ref = (600.0, 1.10 * 300, 300.0, 600 * 0.25)  # (n, engaged, expected, variance) over the last 48 h before promotion
+    c = xd.cusum(flat_after, ref)
+    assert c["alarm"] and c["reference"].startswith("pre-promotion")
+
+
+def test_registry_veto_returns_the_first_reason_and_clear_removes_hooks():
+    from controller.desired import Registry
+    reg = Registry()
+    reg.register_veto(lambda ctx, wid, kind: None)
+    assert reg.veto(None, "w", "experiment_promote") is None
+    reg.register_veto(lambda ctx, wid, kind: f"stale {kind}")
+    assert reg.veto(None, "w", "experiment_promote") == "stale experiment_promote"
+    reg.clear()
+    assert reg.veto(None, "w", "experiment_promote") is None

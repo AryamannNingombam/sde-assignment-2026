@@ -6,8 +6,8 @@ Setup: 3000 dials/day at pickup 0.3 (about 900 connects/day), engagement 0.5, 8 
 
 | scenario | runs | any promotion | promoted A | promoted B | median day of A's promotion |
 |---|---|---|---|---|---|
-| null (both arms 0%) | 1000 | 3.3% | 1.6% | 1.7% | 4 |
-| 10% lift on A, B null | 400 | 49.2% | 49.0% | 0.2% | 4 |
-| 15% lift on A, B null | 400 | 71.2% | 70.0% | 1.2% | 3 |
+| null (both arms 0%) | 1000 | 2.0% | 1.0% | 1.0% | 4 |
+| 10% lift on A, B null | 400 | 38.5% | 38.2% | 0.2% | 4 |
+| 15% lift on A, B null | 400 | 66.0% | 65.2% | 0.8% | 3 |
 
-False-winner rate (null, any arm, any scope): **3.3%** (target <= 5%). Power is the share of runs promoting the truly better arm A within the 8-day run.
+False-winner rate (null, any arm, any scope): **2.0%** (target <= 5%). Power is the share of runs promoting the truly better arm A within the 8-day run.
