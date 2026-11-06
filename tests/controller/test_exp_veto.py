@@ -157,3 +157,83 @@ def test_start_ignores_pre_edit_calls_after_a_supervisor_interruption(store):
     assert ex._start(c, st, WID, "welcome_message") == 2 * DAY + 30
     st2 = {"start_minute": None, "family": ["W2"]}
     assert ex._start(c, st2, WID, "welcome_message") == 100
+
+
+def test_interruption_does_not_re_enter_an_arm_that_was_behind_the_new_control(store):
+    add_calls(store, "W2", 200, 0.40, 100, seed=1)  # old arm W2 clearly below the new control W3
+    add_calls(store, "W3", 200, 0.52, 100, seed=2, lid0=10_000)
+    add_calls(store, "W4", 10, 0.5, 100, seed=3, lid0=20_000)  # thin arm: stays eligible
+    st = {"start_minute": 100, "options": ["W1", "W2", "W3", "W4"]}
+    assert ex._below_new_control(ctx_at(store, 3 * DAY), st, WID, "welcome_message", "W3", []) == ["W2"]
+    assert ex._below_new_control(ctx_at(store, 3 * DAY), st, WID, "welcome_message", "W3", ["W2"]) == []
+    assert ex._below_new_control(ctx_at(store, 3 * DAY), {"start_minute": None, "options": ["W2"]}, WID,
+                                 "welcome_message", "W3", []) == []
+
+
+def promoted_state(store, stage, minute):
+    promo = dict(PROMO, stage=stage, minute=minute - DAY, stage_minute=minute, seq={"start": minute, "ts": []})
+    st = put_state(store, None, promo, phase="promoted")
+    st["start_minute"] = 60
+    xs.save(store, WID, "welcome_message", st)
+    return st
+
+
+def add_ticked(store, arm, rate, minute, n_leads=500, seed=0, lid0=0, version=1):
+    add_calls(store, arm, n_leads, rate, minute, seed=seed, lid0=lid0, version=version)
+
+
+def test_stage_one_winner_that_holds_for_a_day_is_proposed_for_stage_two(store):
+    now = 4 * DAY
+    stage_min = now - DAY - 60
+    promoted_state(store, 1, stage_min)
+    add_ticked(store, "W2", 0.60, now - 800, seed=1)
+    add_ticked(store, "W1", 0.48, now - 800, seed=2, lid0=10_000)
+    st = xs.load(store, WID, "welcome_message")
+    ex._decay_check(ctx_at(store, now), st, WID, "welcome_message")
+    d = st["desired"]
+    assert d and d["kind"] == "experiment_stage2" and d["weights"] == {"W2": 0.9, "W1": 0.1} and not d["severe"]
+
+
+def test_stage_one_does_not_advance_before_24_hours(store):
+    now = 4 * DAY
+    stage_min = now - 600
+    promoted_state(store, 1, stage_min)
+    add_ticked(store, "W2", 0.60, stage_min + 30, seed=1)
+    add_ticked(store, "W1", 0.48, stage_min + 30, seed=2, lid0=10_000)
+    st = xs.load(store, WID, "welcome_message")
+    ex._decay_check(ctx_at(store, now), st, WID, "welcome_message")
+    assert st["desired"] is None
+
+
+def test_a_winner_that_turned_worse_than_its_control_is_rolled_back_severely(store):
+    now = 4 * DAY
+    stage_min = now - DAY
+    promoted_state(store, 1, stage_min)
+    add_ticked(store, "W2", 0.40, stage_min + 30, n_leads=700, seed=1)
+    add_ticked(store, "W1", 0.55, stage_min + 30, n_leads=700, seed=2, lid0=10_000)
+    st = xs.load(store, WID, "welcome_message")
+    ex._decay_check(ctx_at(store, now), st, WID, "welcome_message")
+    d = st["desired"]
+    assert d and d["kind"] == "experiment_rollback" and d["severe"] and d["weights"] == {"W1": 1.0}
+    assert "sequential" in json.dumps(st["decay_status"])
+
+
+def test_a_rollback_replaces_a_pending_stage_two_request(store):
+    now = 4 * DAY
+    stage_min = now - DAY
+    st = promoted_state(store, 1, stage_min)
+    st["desired"] = desired("experiment_stage2", weights={"W2": 0.9, "W1": 0.1})
+    add_ticked(store, "W2", 0.40, stage_min + 30, n_leads=700, seed=1)
+    add_ticked(store, "W1", 0.55, stage_min + 30, n_leads=700, seed=2, lid0=10_000)
+    ex._decay_check(ctx_at(store, now), st, WID, "welcome_message")
+    assert st["desired"]["kind"] == "experiment_rollback"
+
+
+def test_on_applied_records_stage_and_restarts_the_monitoring_epoch(store):
+    st = put_state(store, desired("experiment_stage2", weights={"W2": 0.9, "W1": 0.1}), dict(PROMO, minute=100, stage_minute=100), phase="promoted")
+    ex._on_applied(ctx_at(store, 5 * DAY), st, WID, "welcome_message", 4000)
+    assert st["promo"]["stage"] == 2 and st["promo"]["stage_minute"] == 4000 and st["promo"]["minute"] == 100
+    assert st["promo"]["seq"] == {"start": 4000, "ts": []} and st["desired"] is None
+    st2 = put_state(store, desired("experiment_promote"), {"winner": "W2", "old_control": "W1"}, phase="running")
+    ex._on_applied(ctx_at(store, 5 * DAY), st2, WID, "welcome_message", 5000)
+    assert st2["promo"]["stage"] == 1 and st2["promo"]["minute"] == 5000

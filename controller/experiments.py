@@ -102,9 +102,31 @@ def _on_applied(ctx: PlanContext, st: dict, wid: str, dim: str, minute: int) -> 
                            f"{prop.weights_text(d['weights'])}", wid, {"kind": d["kind"], "phase": st["phase"]})
 
 
+def _below_new_control(ctx: PlanContext, st: dict, wid: str, dim: str, new_control: str, already: list) -> list[str]:
+    """Arms that ran before a supervisor edit and whose own data point BELOW the new control are not re-entered.
+
+    Their pre-edit data stays valid evidence (they ran concurrently with the new control's share), so re-exposing
+    customers to an arm that was already behind it would be an expected-harmful entry. Arms with no data stay eligible.
+    """
+    if st["start_minute"] is None:
+        return []
+    data = exp_data.load_arms(ctx.store, wid, dim, st["start_minute"], ctx.now)
+    ctl = data.get(new_control)
+    out = []
+    for arm in st["options"]:
+        d = data.get(arm)
+        if arm == new_control or arm in already or d is None or ctl is None:
+            continue
+        c = er.pair_contrast(d, ctl)
+        if c is not None and c.n_a >= settings.EXP_RAMP_MIN_CONNECTS and c.lift < 0:
+            out.append(arm)
+    return sorted(out)
+
+
 def _interrupt(ctx: PlanContext, st: dict, wid: str, dim: str, cfg, version: int, minute: int, dist: Mapping) -> dict:
     new_control = xs.top_option(dist)
     bad = [a for a, v in st["arms"].items() if v["state"] in ("dropped", "harm_stopped")]
+    bad += _below_new_control(ctx, st, wid, dim, new_control, bad)
     note = (f"A client supervisor set {dim} to {new_control} at {xs.clock(minute)} (config v{version}); treating it as "
             f"the new control (never re-imposing {st['control']}). ")
     fresh = _new_state(ctx.workflows[wid], dim, cfg, st["excluded"] + bad, note, minute + settings.EXP_SUPERVISOR_COOLDOWN_MINUTES)
