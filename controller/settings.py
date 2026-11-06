@@ -9,7 +9,7 @@ from __future__ import annotations
 ENABLE_DID = True  # Phase 3 green
 ENABLE_HALLUC = True  # Phase 3 green
 ENABLE_SCHEDULE = True  # Phase 5 green
-ENABLE_EXPERIMENTS = False
+ENABLE_EXPERIMENTS = True
 ENABLE_PERSON_ANALYSIS = False
 
 # --- Time stepping -----------------------------------------------------------

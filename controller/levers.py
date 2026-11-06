@@ -1,7 +1,7 @@
 """Registers the Phase 3 detectors/producers on the default registry (each behind its own flag)."""
 from __future__ import annotations
 
-from . import baselines, schedule, settings
+from . import baselines, experiments, schedule, settings
 from .desired import DEFAULT_REGISTRY, PlanContext, Registry
 from .detectors import did, halluc, prompt_safety
 
@@ -23,6 +23,7 @@ def register_defaults(registry: Registry = DEFAULT_REGISTRY) -> None:
     prompt_safety.register(registry)
     did.register(registry)
     schedule.register(registry)
+    experiments.register(registry)
 
 
 register_defaults()

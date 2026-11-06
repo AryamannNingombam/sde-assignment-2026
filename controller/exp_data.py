@@ -46,11 +46,11 @@ def load_arms(store: Store, wid: str, dim: str, start_minute: int, now: int,
     return {arm: ArmData(eng.get(arm, {}), rec.get(arm, {}), pick.get(arm, {})) for arm in set(eng) | set(pick) | set(rec)}
 
 
-def first_exposure_minute(store: Store, wid: str, dim: str, options: Sequence[str]) -> int | None:
+def first_exposure_minute(store: Store, wid: str, dim: str, options: Sequence[str], since: int = 0) -> int | None:
     """First call served by any of ``options`` (the decay clock of a challenger starts here)."""
     if not options:
         return None
     col = column(dim)
-    row = store.conn.execute(f"SELECT MIN(ts_minute) FROM calls WHERE workflow_id=? AND {col} IN"
-                             f" ({','.join('?' * len(options))})", [wid, *options]).fetchone()
+    row = store.conn.execute(f"SELECT MIN(ts_minute) FROM calls WHERE workflow_id=? AND ts_minute>=? AND {col} IN"
+                             f" ({','.join('?' * len(options))})", [wid, since, *options]).fetchone()
     return None if row is None or row[0] is None else int(row[0])

@@ -134,7 +134,8 @@ def build_draft(store, vocab: FeatureVocab, wf: Mapping, version: int, current: 
     dry = dryrun.build_dry_run(store, vocab, wf, current, cfg, now, list(dims), evidence)
     for change in changes:  # producers may attach their own estimates (e.g. the call-time guardrail dry run)
         dry.update(change.evidence.get("dry_run_extra", {}))
-    override = next((c.evidence["impact_override"] for c in changes if "impact_override" in c.evidence), None)
+    overrides = [c.evidence["impact_override"] for c in changes if "impact_override" in c.evidence]
+    override = max(overrides) if overrides else None
     return ProposalDraft(
         workflow_id=wf["workflow_id"], kind=min(changes, key=lambda c: (c.priority, c.kind)).kind,
         base_version=version, proposed_config=cfg, dims=dims, max_shift=max(tv.values(), default=0.0),
