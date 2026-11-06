@@ -68,6 +68,7 @@ level, times the change the fatigue curve predicts from its own load trajectory.
 | `SIBLING_N` | 200 | 2 credits per sibling. | At n=200 a 0.9% failure rate cannot be separated from a 2.7% one without a top-up (below). |
 | `SIBLING_TOPUP_N` | 300 | One 3-credit top-up when the sibling's observed rate is below the live prompt's lower bound but its upper bound still overlaps. | Pooled n=500 lets the bounds separate a ~1 pp gap only about half the time. |
 | `SIBLING_BOUND_Z` | 1.645 | One-sided 95% Wilson bounds on each side: sibling upper bound < live lower bound ("clearly safer"). | 1.96 needs roughly 40% more n. |
+| `SIBLING_MIN_LIVE_FRACTION` | 0.5 | Materiality: the live prompt's failure lower bound must be at least half the workflow's tolerance (1 - min pass = 3%, so 1.5%). A first run switched a healthy prompt (true failure ~1%, 7/300 observed) to the strict-script prompt on bounds that merely separated: -14% engagement, graded harmful. With the gate a bound-separated but immaterial gap gets one 3-credit second look at the live prompt, then no switch. Note a switch away from a permissive prompt (e.g. 2.7% failure) still costs engagement by construction: it is a safety-vs-engagement trade the approver signs off. | 0.33 (the 1 pp non-inferiority margin) admits the false switch above. |
 | credits | - | Routine spend rule: after every run the balance must still hold `CREDIT_RESERVE_PER_WORKFLOW` x workflows. | - |
 
 Verification after apply reuses the C8 constants (`HALLUC_VERIFY_*`, flag margin = a third of the workflow's

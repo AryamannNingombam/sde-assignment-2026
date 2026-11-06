@@ -34,8 +34,13 @@ def pooled(runs: list[Mapping]) -> tuple[int, int]:
     return sum(round((1 - r["pass_rate"]) * r["n"]) for r in runs), n
 
 
-def compare(live_runs: list[Mapping], sib_runs: list[Mapping]) -> dict:
-    """Failure-rate bounds of the live prompt and a sibling; ``clear`` iff sibling upper < live lower."""
+def compare(live_runs: list[Mapping], sib_runs: list[Mapping], ceiling: float | None = None) -> dict:
+    """Failure-rate bounds of the live prompt and a sibling; ``clear`` iff sibling upper < live lower.
+
+    ``material`` (when a ``ceiling`` is given): the live prompt's failure lower bound is at least
+    ``SIBLING_MIN_LIVE_FRACTION`` of the workflow's own tolerance (1 - min validation pass rate). A bound-separated
+    but immaterial gap is validation noise between two acceptable prompts, and a switch can cost engagement.
+    """
     lf, ln = pooled(live_runs)
     sf, sn = pooled(sib_runs)
     z = settings.SIBLING_BOUND_Z
@@ -43,6 +48,7 @@ def compare(live_runs: list[Mapping], sib_runs: list[Mapping]) -> dict:
     return {"live_fail": lf, "live_n": ln, "live_rate": lf / ln if ln else None, "live_lb": round(live_lb, 5),
             "sib_fail": sf, "sib_n": sn, "sib_rate": sf / sn if sn else None, "sib_ub": round(sib_ub, 5),
             "clear": bool(ln and sn and sib_ub < live_lb),
+            "material": ceiling is None or live_lb >= settings.SIBLING_MIN_LIVE_FRACTION * ceiling,
             "promising": bool(ln and sn and sf / sn < live_lb)}
 
 
@@ -77,20 +83,27 @@ def _check_workflow(ctx: PlanContext, wid: str, live: str) -> dict:
     if not live_runs:
         return out
     clear: list[tuple[float, str, dict]] = []
+    ceiling, live_topped = _ceiling(wf), False
     for prompt in [p for p in wf["options"]["prompt_version"] if p != live][:settings.SIBLING_MAX]:
         runs = _validate_sibling(ctx, wid, prompt, out)
         if runs is None:
             continue
-        cmp_ = compare(live_runs, runs)
+        cmp_ = compare(live_runs, runs, ceiling)
         topup = validation_cost(settings.SIBLING_TOPUP_N)
         if not cmp_["clear"] and cmp_["promising"] and len(runs) == 1 and _afford(ctx, topup):
             run_validation(ctx.client, ctx.store, wid, prompt, ctx.now, settings.SIBLING_TOPUP_N)
             out["credits"] += topup
             runs = validations_of(ctx.store, wid, prompt)
-            cmp_ = compare(live_runs, runs)
+            cmp_ = compare(live_runs, runs, ceiling)
+        if cmp_["clear"] and not cmp_["material"] and not live_topped and _afford(ctx, topup):
+            run_validation(ctx.client, ctx.store, wid, live, ctx.now, settings.SIBLING_TOPUP_N)  # one second look at the live prompt
+            live_topped = True
+            out["credits"] += topup
+            live_runs = validations_of(ctx.store, wid, live)
+            cmp_ = compare(live_runs, runs, ceiling)
         out["checked"][prompt] = cmp_
         best = _best_run(runs, min_pass)
-        if cmp_["clear"] and best is not None:
+        if cmp_["clear"] and cmp_["material"] and best is not None:
             info = {**cmp_, "validation_run_id": best["run_id"], "pass_rate": best["pass_rate"]}
             clear.append((cmp_["sib_ub"], prompt, info))
     if clear:

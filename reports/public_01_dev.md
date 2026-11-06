@@ -4,14 +4,14 @@
 
 | workflow | conclusion rate | Δ | pickup | Δ | engagement | Δ | engagement gap captured | hallucinated calls (base) |
 |---|---|---|---|---|---|---|---|---|
-| ks_cancel | 0.371 | +11.3% | 0.262 | +10.1% | 0.494 | +0.6% | 0% | 56 (47) |
-| nw_kyc | 0.400 | +10.0% | 0.262 | +8.3% | 0.593 | +0.5% | 0% | 22 (21) |
-| nw_renewal | 0.444 | +5.7% | 0.279 | +6.1% | 0.546 | +0.2% | 0% | 51 (42) |
-| ALL | 0.401 | +8.9% | 0.268 | +8.3% | 0.532 | +0.3% | 0% | 129 (110) |
+| ks_cancel | 0.368 | +10.4% | 0.257 | +7.7% | 0.499 | +1.7% | 0% | 70 (47) |
+| nw_kyc | 0.377 | +3.7% | 0.252 | +4.3% | 0.587 | -0.6% | 0% | 32 (21) |
+| nw_renewal | 0.445 | +6.0% | 0.278 | +5.5% | 0.550 | +0.8% | 0% | 50 (42) |
+| ALL | 0.395 | +7.4% | 0.263 | +6.2% | 0.534 | +0.8% | 0% | 152 (110) |
 
 ## Changes applied by the controller
 
-13 applied — neutral: 8, beneficial: 4, harmful: 1
+12 applied — neutral: 9, beneficial: 3
 
 - ks_cancel v2 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.004 → **neutral**
 - nw_renewal v2 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.004 → **neutral**
@@ -19,13 +19,12 @@
 - ks_cancel v3 (controller_approved) dims=['cohorts', 'schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
 - nw_kyc v2 (controller_approved) dims=['cohorts', 'caller_id', 'schedule'] engageΔ=+0.000 didΔ=+0.009 → **neutral**
 - ks_cancel v4 (controller_auto) dims=['schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
-- ks_cancel v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.022 → **beneficial**
-- ks_cancel v6 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.015 → **neutral**
-- nw_renewal v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.037 → **beneficial**
-- nw_renewal v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=-0.096 → **harmful**
-- nw_renewal v6 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.115 → **beneficial**
+- ks_cancel v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.028 → **beneficial**
+- ks_cancel v6 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.019 → **neutral**
+- nw_renewal v4 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.029 → **beneficial**
 - ks_cancel v7 (controller_auto) dims=['schedule'] engageΔ=+0.000 didΔ=+0.000 → **neutral**
-- nw_kyc v3 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.227 → **beneficial**
+- nw_renewal v5 (controller_auto) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.009 → **neutral**
+- nw_kyc v3 (controller_approved) dims=['caller_id'] engageΔ=+0.000 didΔ=+0.229 → **beneficial**
 
 ## Governance
 
@@ -38,7 +37,7 @@
   },
   "rejection_reasons": {},
   "applied_via_approval": 4,
-  "auto_applied": 9,
+  "auto_applied": 8,
   "auto_apply_rejected": 0,
   "apply_conflicts": 0,
   "lapsed": 0,

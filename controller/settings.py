@@ -165,3 +165,4 @@ SCHEDULE_VERIFY_MIN_DIALS = 1500  # post-apply dials before the before/after pic
 SCHEDULE_VERIFY_DONE_DIALS = 4000  # ... and after which a passing check is final
 SCHEDULE_VERIFY_P = 0.05  # one-sided p for "pickup fell by at least the guardrail"
 SCHEDULE_MIN_HISTORY_DAYS_COLD = 1  # cold start: build cohorts from this many full days of live data
+SIBLING_MIN_LIVE_FRACTION = 0.5  # the live prompt's failure lower bound must be >= half the workflow's tolerance (1 - min pass)

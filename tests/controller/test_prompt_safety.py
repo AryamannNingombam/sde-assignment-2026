@@ -95,3 +95,16 @@ def test_lifecycle_applied_then_dropped_when_supervisor_changes_prompt(tmp_path)
     st = {"phase": ps.RECOMMENDED, "live": "P4", "candidate": "P3"}
     assert ps._advance(ctx, "w", st, "P3") and st["phase"] == ps.APPLIED and st["old"] == "P4"
     assert ps._advance(ctx, "w", st, "P2") and st["phase"] == ps.DROPPED
+
+
+def test_immaterial_live_failure_rate_is_not_switched_even_if_bounds_separate(tmp_path):
+    c = ps.compare([run("a", "P1", 300, 6)], [run("b", "P5", 500, 0)], ceiling=0.03)
+    assert c["clear"] and not c["material"]  # 2% observed vs 0%: noise between two prompts inside the tolerance
+
+
+def test_live_prompt_gets_one_second_look_before_an_immaterial_switch(tmp_path):
+    client = FakeClient({"P1": 0, "P2": 9, "P3": 9, "P4": 6})  # live P4: 6/300 then 6/300 more (same fake rate)
+    ctx = ctx_for(tmp_path, client)
+    out = ps._check_workflow(ctx, "w", "P4")
+    assert [c for c in client.calls if c[0] == "P4"] == [("P4", settings.SIBLING_TOPUP_N)]
+    assert out["phase"] is None  # pooled live 12/600 = 2%: lower bound 1.2% < half the 3% tolerance
