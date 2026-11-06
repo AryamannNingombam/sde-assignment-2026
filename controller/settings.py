@@ -54,7 +54,7 @@ SOFT_CAPS: dict[str, dict[str, int]] = {
     "ks_cancel": {"max_per_day": 2, "not_before_hour": 11},
 }
 FILE_MIN_P_ROUTINE = 0.9  # min P(decision lands before expires_at) to file a routine request
-FILE_MIN_P_URGENT = 0.3  # ... for an incident / severe (harm-stop, rollback) request
+FILE_MIN_P_URGENT = 0.5  # ... for an incident / severe (harm-stop, rollback) request: a coin-flip, not a long shot
 SUBMIT_FAILED_BACKOFF_MIN = 240  # sim minutes before the same (workflow, kind, route) is resubmitted
 AUTO_APPLY_MIN_GAP_MINUTES = 60  # A5: one auto-apply step per workflow per hour ...
 AUTO_APPLY_INCIDENT_GAP_MINUTES = 15  # ... or per tick in incident mode
