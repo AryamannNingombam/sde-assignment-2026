@@ -120,25 +120,63 @@ def _proposal(store: Store, proposal_id: str | None) -> dict | None:
              rationale=req.get("rationale"), dry_run=req.get("dry_run"),
              superseded_by=[r["proposal_id"] for r in _rows(
                  store, "SELECT proposal_id FROM proposals WHERE supersedes=?", (proposal_id,))])
-    p["events"] = _rows(store, "SELECT ts_minute, event, approval_id, payload FROM proposal_events"
+    p["events"] = _rows(store, "SELECT ts_minute, event, approval_id, payload, event_id FROM proposal_events"
                         " WHERE proposal_id=? ORDER BY id", (proposal_id,))
     for e in p["events"]:
         e["payload"] = _json(e["payload"])
-    p["approval"] = _approval(p)
+    p["events"] = merge_decision_events(p["events"])
+    p["approval"] = _approval(p, store)
     return p
 
 
-def _approval(p: dict) -> dict | None:
+_DECISIONS = ("APPROVED", "REJECTED", "EXPIRED")
+
+
+def merge_decision_events(events: list[dict]) -> list[dict]:
+    """The sim's decision event (sim time) and our own state change (the tick that observed it) describe ONE
+    approval decision. Show it once: ``decided_at`` = sim decision time, ``observed_at`` = our observation."""
+    sim = {e["event"].upper(): e for e in events if e.get("event_id") is not None and e["event"].upper() in _DECISIONS}
+    out, used = [], set()
+    for e in events:
+        if e.get("event_id") is not None and e["event"].upper() in _DECISIONS and e["event"].upper() in sim:
+            twin = any(o["event"] == e["event"].upper() and o.get("event_id") is None for o in events)
+            if twin:
+                continue  # folded into our own row below
+        if e["event"] in _DECISIONS and e.get("event_id") is None and e["event"] in sim and e["event"] not in used:
+            used.add(e["event"])
+            decided = sim[e["event"]]
+            out.append({**e, "ts_minute": decided["ts_minute"], "decided_at": decided["ts_minute"],
+                        "observed_at": e["ts_minute"]})
+            continue
+        out.append(e)
+    return out
+
+
+def workflow_policy(store: Store, wid: str) -> dict | None:
+    """Governance policy and objective stored at startup (``meta``), so audit answers need no HTTP."""
+    raw = store.get_meta(f"workflow_policy:{wid}")
+    if not raw:
+        return None
+    d = json.loads(raw)
+    gov = d.get("governance") or {}
+    return {"approver_hours": gov.get("approver_hours"), "approver_latency_minutes": gov.get("approver_latency_minutes"),
+            "proposal_ttl_hours": gov.get("proposal_ttl_hours"), "max_requests_per_24h": gov.get("max_requests_per_24h"),
+            "objective": d.get("objective")}
+
+
+def _approval(p: dict, store: Store | None = None) -> dict | None:
     """Approval facts. The sim exposes no approver names (A4): the approver is the workflow's policy approver."""
     if not p.get("approval_id"):
         return None
-    decided = next((e for e in p["events"] if e["event"] in ("APPROVED", "REJECTED", "EXPIRED")
-                    and isinstance(e["payload"], dict)), None)
-    decided_at = decided["payload"].get("decided_at") if decided else None
-    return {"approval_id": p["approval_id"], "decided_at": decided_at,
+    decided = next((e for e in p["events"] if e["event"] in _DECISIONS), None)
+    decided_min = (decided.get("decided_at", decided["ts_minute"]) if decided else None)
+    observed = decided.get("observed_at", decided["ts_minute"]) if decided else None
+    return {"approval_id": p["approval_id"], "decided_at": fmt_minute(decided_min) if decided else None,
+            "observed_at": fmt_minute(observed) if decided else None,
             "decision": decided["event"] if decided else None,
-            "decided_minute": decided["ts_minute"] if decided else None,
-            "approver": f"policy approver of {p['proposal_id'].split(':')[0]}"}
+            "decided_minute": decided_min, "observed_minute": observed,
+            "approver": f"policy approver of {p['proposal_id'].split(':')[0]}",
+            "policy": workflow_policy(store, p["proposal_id"].split(":")[0]) if store is not None else None}
 
 
 def _evidence(store: Store, wid: str, upto: int, since: int) -> list[dict]:

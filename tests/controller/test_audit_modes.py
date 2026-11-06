@@ -71,3 +71,23 @@ def test_cli_modes_and_json(ran, capsys):
     assert "lead " in capsys.readouterr().out
     assert cli_main(base + ["--workflow", "nw_renewal"]) == 2
     assert cli_main(["why", "--db", str(ran.path) + ".nope", "--lead", "x"]) == 1
+
+
+def test_approval_decision_is_shown_once_with_sim_and_observation_times(ran):
+    p = audit.why_at(ran, "nw_renewal", 1 * 1440 + 60)["proposal"]
+    decisions = [e for e in p["events"] if e["event"].upper() in ("APPROVED", "REJECTED")]
+    assert len(decisions) == 1  # the sim event and our state change are one decision
+    d = decisions[0]
+    assert d["decided_at"] <= d["observed_at"]  # sim decision time precedes the tick that observed it
+    ap = p["approval"]
+    assert ap["decided_at"] and ap["observed_at"] and ap["decided_minute"] == d["decided_at"]
+    text = audit_render.render_at(audit.why_at(ran, "nw_renewal", 1 * 1440 + 60))
+    assert "decided_at" in text and "observed_at" in text
+
+
+def test_workflow_policy_is_stored_at_startup_and_printed(ran):
+    pol = audit.workflow_policy(ran, "nw_renewal")
+    assert pol["approver_hours"] == [10, 19] and pol["approver_latency_minutes"] == [30, 240]
+    assert pol["objective"]["primary"] == "engagement_rate"
+    text = audit_render.render_at(audit.why_at(ran, "nw_renewal", 1 * 1440 + 60))
+    assert "approver hours [10, 19]" in text and "latency [30, 240]" in text

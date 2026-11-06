@@ -34,13 +34,20 @@ def _proposal_lines(p: dict) -> list[str]:
         lines.append(f"    dry_run: {_compact(p['dry_run'])}")
     ap = p.get("approval")
     if ap:
-        lines.append(f"    approval {ap['approval_id']}: {ap['decision']} (decided_at {ap['decided_at']}) by"
-                     f" {ap['approver']}; the sim exposes no approver names")
+        lines.append(f"    approval {ap['approval_id']}: {ap['decision']} (decided_at {ap['decided_at']},"
+                     f" observed_at {ap['observed_at']}) by {ap['approver']}; the sim exposes no approver names")
+        pol = ap.get("policy")
+        if pol:
+            lines.append(f"    policy: approver hours {pol['approver_hours']}, latency {pol['approver_latency_minutes']} min,"
+                         f" ttl {pol['proposal_ttl_hours']} h, max {pol['max_requests_per_24h']} requests/24h;"
+                         f" objective {pol['objective']}")
     elif p["route"] == "auto":
         lines.append("    auto-applied under the workflow's auto_apply policy (no approval)")
     lines.append("  proposal lifecycle:")
     for e in p["events"]:
         extra = e["payload"].get("note", "") if isinstance(e["payload"], dict) else e["payload"]
+        if "decided_at" in e:
+            extra = f"decided_at {fmt_minute(e['decided_at'])}, observed_at {fmt_minute(e['observed_at'])} {extra or ''}"
         lines.append(f"    {fmt_minute(e['ts_minute'])} {e['event']} {extra or ''}".rstrip())
     if p.get("superseded_by"):
         lines.append(f"    superseded-by proposals: {p['superseded_by']}")
@@ -119,7 +126,7 @@ def render_lead(r: dict[str, Any]) -> str:
             lines.append(f"    rationale: {p['rationale']}")
             ap = p.get("approval")
             if ap:
-                lines.append(f"    approval {ap['approval_id']} {ap['decision']} at {ap['decided_at']}"
-                             f" by {ap['approver']}")
+                lines.append(f"    approval {ap['approval_id']} {ap['decision']} decided_at {ap['decided_at']}"
+                             f" observed_at {ap['observed_at']} by {ap['approver']}")
         lines += _decision_lines(basis["decisions"], "    ")
     return "\n".join(lines)

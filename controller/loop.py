@@ -6,6 +6,7 @@ nothing); governance reconciliation runs at startup and on every tick.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -100,6 +101,10 @@ class Controller:
         workflows = self.client.workflows()
         self._workflow_ids = [w["workflow_id"] for w in workflows]
         self.windows = Windows.from_workflows(workflows)
+        for w in workflows:  # the audit prints approver hours/latency from OUR store (R7)
+            self.store.set_meta(f"workflow_policy:{w['workflow_id']}",
+                                json.dumps({"governance": w.get("governance"), "objective": w.get("objective")},
+                                           sort_keys=True))
         mirror_configs(self.client, self.store, self._workflow_ids)
         self.gov = Governance(self.client, self.store, {w["workflow_id"]: w for w in workflows})
         self.planner = Planner(self.client, self.store, self.gov, self.registry)
