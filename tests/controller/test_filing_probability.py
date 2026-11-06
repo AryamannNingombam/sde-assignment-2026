@@ -32,7 +32,7 @@ def test_short_ttl_still_files_with_partial_probability():
     p = fatigue.decision_probability(at(0, 10), gov)
     assert 0.5 < p < 0.9  # latency 30..240 vs a 180 min ttl
     assert not fatigue.filing_window_ok(at(0, 10), gov, True, "x")[0]  # routine needs 0.9
-    assert fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]  # urgent needs only 0.3
+    assert fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]  # urgent needs 0.5
     assert fatigue.filing_window_ok(at(0, 10), {**gov, "proposal_ttl_hours": 4}, True, "x")[0]
 
 
@@ -99,3 +99,13 @@ def test_budget_tiers_for_totals_1_to_4(total, routine, severe, incident):
     assert fatigue.slot_limit(gov, Priority.INCIDENT, "x") == incident
     assert fatigue.slot_available(0, gov, Priority.ROUTINE, "x")[0]
     assert fatigue.slot_available(0, gov, Priority.SEVERE, "x")[0]
+
+
+def test_urgent_threshold_is_a_coin_flip_not_a_long_shot():
+    """D5: an incident is filed at P >= 0.5, never at the old 0.3 (a 70% expiry that burns slot and hygiene)."""
+    assert fatigue.settings.FILE_MIN_P_URGENT == 0.5
+    gov = {**NW_RENEWAL, "proposal_ttl_hours": 2}
+    assert 0.3 < fatigue.decision_probability(at(0, 10), gov) < 0.5
+    assert not fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]
+    gov = {**NW_RENEWAL, "proposal_ttl_hours": 3}
+    assert fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]
