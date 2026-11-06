@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     status = sub.add_parser("status")
     status.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
     args = ap.parse_args(argv)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     return cmd_run(args) if args.cmd == "run" else cmd_status(args)
