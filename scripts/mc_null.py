@@ -479,7 +479,7 @@ def render(rows: list[dict]) -> list[str]:
     null = next(r for r in rows if r["label"].startswith("null (all"))
     lines += ["", f"False-winner rate under the null (any arm, any scope): **{null['any']:.1%}** (target <= 5%). A null scenario "
               "has 4 experiments (2 workflows x 2 dims), so the chance of at least one false promotion is about 4x this. The "
-              "unstratified drift row shows what the Mantel-Haenszel pooling protects against.", "",
+              "unstratified drift row is the comparison: at a +-5% drift the two false-winner rates are indistinguishable (the drift averages out over day-end looks and the shares move little before a winner is declared), so stratification costs no size or power here and only guards the contrast against confounding when shares and the base rate move together.", "",
               "## Decaying arm (true lift +15% falling to -10% over 2 days from a random onset in days 1-6)", "",
               "Columns: promotion = stage 1 live; stage 2 = 90/10 live; rolled back = A removed again within 16 days; "
               "exposure-days = sum over ticks after onset of A's live share x tick length, over runs where A was promoted; "

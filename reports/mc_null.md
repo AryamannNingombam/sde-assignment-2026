@@ -16,7 +16,7 @@ Setup: 3000 dials/day at pickup 0.3 (about 900 connects/day), engagement 0.5, 45
 | null + base-rate drift +-5%, NOT stratified | 300 | 1.3% | 1.0% | 0.3% | - | 4.3 | 74%/74%/- | 62%/59%/- |
 | 15% lift on A + drift, stratified | 300 | 62.3% | 62.0% | 0.3% | - | 4.8 | 99%/67%/- | 0%/37%/- |
 
-False-winner rate under the null (any arm, any scope): **1.0%** (target <= 5%). A null scenario has 4 experiments (2 workflows x 2 dims), so the chance of at least one false promotion is about 4x this. The unstratified drift row shows what the Mantel-Haenszel pooling protects against.
+False-winner rate under the null (any arm, any scope): **1.0%** (target <= 5%). A null scenario has 4 experiments (2 workflows x 2 dims), so the chance of at least one false promotion is about 4x this. The unstratified drift row is the comparison: at a +-5% drift the two false-winner rates are indistinguishable (the drift averages out over day-end looks and the shares move little before a winner is declared), so stratification costs no size or power here and only guards the contrast against confounding when shares and the base rate move together.
 
 ## Decaying arm (true lift +15% falling to -10% over 2 days from a random onset in days 1-6)
 
