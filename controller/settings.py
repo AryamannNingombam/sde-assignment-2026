@@ -231,6 +231,10 @@ PERSON_PRIOR_STRENGTH = 20.0  # PRIOR (documented in docs/THRESHOLDS.md): pseudo
 PERSON_PASS_PROB = 0.8  # would-assign only if P(best block pickup > cohort average) >= this
 PERSON_MAX_ROWS_PER_WORKFLOW = 50_000  # cap on persisted per-person rows (bounded table)
 
+# --- floor fixes C ---
+EXP_DROP_VETO_RECOVERED_Z = -1.0  # apply-time: a ramped arm's drop is vetoed only if its last-24h z recovered above this
+EXP_DROP_VETO_Z_MARGIN = 0.5  # apply-time: ... or its cumulative z is above the drop bound by this margin
+
 # --- floor fixes D ---
 SUBMIT_FAILED_BACKOFF_URGENT_MIN = 30  # incident approval-route resend delay after a failed send (fixed, no doubling)
 VETO_CRASH_MAX_RETRIES = 3  # a crashing apply-time veto hook keeps an approval alive this many ticks before it is withheld

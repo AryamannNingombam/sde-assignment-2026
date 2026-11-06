@@ -109,17 +109,33 @@ def pickup_guard(data: Mapping[str, ArmData], control: str, arm: str, max_drop: 
                                     "drop_upper": upper_drop, "margin": max_drop, "dials_arm": c.n_a}
 
 
+def ramp_blocked(s: Mapping) -> bool:
+    """A bad recent window (last 24 h z <= EXP_DROP_Z on >= EXP_RECENT_MIN_CONNECTS) blocks a ramp at the look and at apply.
+
+    The window needs only EXP_RECENT_MIN_CONNECTS: a 7.5% arm sees ~85 connects a day, below the 100 a ramp needs
+    cumulatively, so a threshold of 100 never let a decaying entry arm's recent window count (C5)."""
+    return bool(s.get("ok")) and s["recent_n"] >= settings.EXP_RECENT_MIN_CONNECTS and s.get("recent_z", 0.0) <= settings.EXP_DROP_Z
+
+
 def ramp_vetoed(s: Mapping) -> bool:
     """Apply-time predicate for a ramp: cumulative z at the drop bound, or a bad recent window."""
     if not s.get("ok"):
         return False
-    recent_bad = s["recent_n"] >= settings.EXP_RAMP_MIN_CONNECTS and s.get("recent_z", 0.0) <= settings.EXP_DROP_Z
-    return s["z"] <= drop_threshold(s["n_arm"]) or recent_bad
+    return s["z"] <= drop_threshold(s["n_arm"]) or ramp_blocked(s)
 
 
 def drop_vetoed(s: Mapping, is_ramped: bool = False) -> bool:
-    """Apply-time predicate for a drop: the same predicate no longer holds (the arm recovered)."""
-    return bool(s.get("ok")) and not drop_holds(s, is_ramped)
+    """Apply-time predicate for a drop: vetoed only when the arm has clearly RECOVERED (hysteresis).
+
+    Re-running ``drop_holds`` at the same bound hours later flips on noise at the bound, and a drop only moves traffic
+    back to control, so the apply-time bar is looser: the cumulative z must be above the drop bound by
+    EXP_DROP_VETO_Z_MARGIN, and (for a ramped arm) the last-24h z above EXP_DROP_VETO_RECOVERED_Z."""
+    if not s.get("ok"):
+        return False
+    cum_holds = s["z"] <= drop_threshold(s["n_arm"]) + settings.EXP_DROP_VETO_Z_MARGIN
+    recent_holds = (is_ramped and s["recent_n"] >= settings.EXP_RAMP_MIN_CONNECTS
+                    and s.get("recent_z", 0.0) <= settings.EXP_DROP_VETO_RECOVERED_Z)
+    return not (cum_holds or recent_holds)
 
 
 def revert_expected_change(shares: Mapping[str, float], rates: Mapping[str, float], control: str, arm: str) -> float:
@@ -170,7 +186,7 @@ def daily_look(data: Mapping[str, ArmData], control: str, active: Sequence[str],
         enough = exposure_days >= settings.EXP_RAMP_MIN_DAYS and s["n_arm"] >= settings.EXP_RAMP_MIN_CONNECTS
         if enough and drop_holds(s, arm in ramped):
             out.drop.append(arm)
-        elif enough and s["lift"] >= 0 and arm not in ramped:
+        elif enough and s["lift"] >= 0 and arm not in ramped and not ramp_blocked(s):
             out.ramp.append(arm)
     if not test_winner or looks_taken >= len(settings.EXP_LOOK_FRACTIONS):
         return out
