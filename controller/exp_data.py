@@ -30,8 +30,7 @@ def _group(store: Store, sql: str, args: list) -> dict[str, dict[int, tuple[floa
     return out
 
 
-_STRATUM = ("(day*1000 + (SELECT COUNT(*) FROM config_versions cv WHERE cv.workflow_id=calls.workflow_id"
-            " AND cv.ts_minute<=calls.ts_minute))")
+_STRATUM = "(day*100000 + config_version)"  # one stratum per day and live config version (= share regime)
 
 
 def _group_strata(store: Store, sql: str, args: list) -> dict[str, dict[str, dict[int, tuple[float, float]]]]:
@@ -54,7 +53,7 @@ def load_arms(store: Store, wid: str, dim: str, start_minute: int, now: int,
               cells: Sequence[int] | None = None) -> dict[str, ArmData]:
     """Arm data for calls at or after ``start_minute`` (``recent`` = the last EXP_RECENT_MINUTES).
 
-    Engagement is also returned per stratum (day x number of config versions live at the call = share regime),
+    Engagement is also returned per stratum (day x the config version live at the call = share regime),
     so contrasts can be Mantel-Haenszel pooled.
     """
     col = column(dim)

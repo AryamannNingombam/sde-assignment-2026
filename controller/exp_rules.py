@@ -97,6 +97,28 @@ def pickup_guard(data: Mapping[str, ArmData], control: str, arm: str, max_drop: 
                                     "drop_upper": upper_drop, "margin": max_drop, "dials_arm": c.n_a}
 
 
+def revert_expected_change(shares: Mapping[str, float], rates: Mapping[str, float], control: str, arm: str) -> float:
+    """Expected relative engagement change of moving ``arm``'s share back to control, on OBSERVED arm rates."""
+    before = sum(s * rates.get(a, rates[control]) for a, s in shares.items()) + (1.0 - sum(shares.values())) * rates[control]
+    return shares[arm] * (rates[control] - rates[arm]) / before if before > 0 else 0.0
+
+
+def end_of_experiment_reverts(summary: Mapping[str, dict], shares: Mapping[str, float], control: str) -> list[str]:
+    """After the last look without a winner: arms whose point estimate is below control revert to control, but only
+    if that revert is not itself expected-harmful on the observed arm rates (a surviving arm needs point >= 0)."""
+    rates = {control: next((s["rate_ctrl"] for s in summary.values() if s.get("ok")), 0.0)}
+    for arm, s in summary.items():
+        if s.get("ok"):
+            rates[arm] = s["rate_arm"]
+    out = []
+    for arm, s in summary.items():
+        if not s.get("ok") or arm not in shares or s["lift"] >= 0 or arm not in rates or not rates[control]:
+            continue
+        if revert_expected_change(shares, rates, control, arm) >= -settings.EXP_REVERT_MAX_EXPECTED_DROP:
+            out.append(arm)
+    return sorted(out)
+
+
 @dataclass
 class LookOutcome:
     took_look: bool = False

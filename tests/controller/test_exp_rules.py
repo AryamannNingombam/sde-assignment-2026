@@ -131,3 +131,19 @@ def test_stratified_contrast_is_used_when_both_arms_carry_strata():
     plain = es.contrast(d_a.engaged, d_c.engaged)
     pooled = er.pair_contrast(d_a, d_c)
     assert pooled.effect != pytest.approx(plain.effect) and pooled.n_a == 100 and pooled.n_c == 250
+
+
+def test_end_of_experiment_reverts_only_negative_point_estimates():
+    summ = {"A": {"ok": True, "lift": -0.04, "rate_arm": 0.48, "rate_ctrl": 0.5},
+            "B": {"ok": True, "lift": 0.01, "rate_arm": 0.505, "rate_ctrl": 0.5},
+            "C": {"ok": False}}
+    assert er.end_of_experiment_reverts(summ, {"A": 0.2, "B": 0.2, "C": 0.075}, "X") == ["A"]
+
+
+def test_revert_expected_change_is_positive_for_a_worse_arm_and_negative_for_a_better_one():
+    rates = {"X": 0.5, "A": 0.45, "B": 0.55}
+    assert er.revert_expected_change({"A": 0.2}, rates, "X", "A") > 0
+    assert er.revert_expected_change({"B": 0.2}, rates, "X", "B") < 0
+    # a stale point estimate that contradicts the rates never reverts
+    summ = {"B": {"ok": True, "lift": -0.01, "rate_arm": 0.55, "rate_ctrl": 0.5}}
+    assert er.end_of_experiment_reverts(summ, {"B": 0.2}, "X") == []

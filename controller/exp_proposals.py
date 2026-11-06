@@ -33,13 +33,20 @@ def update(dim: str, weights: Mapping[str, float], ramp: list, drop: list, rows:
 
 
 def promotion(dim: str, wf_scope: str, winner: str, control: str, rec: Mapping, weights: Mapping[str, float]) -> tuple[str, str]:
-    summary = (f"Promote {winner} for {dim} ({wf_scope}): lift {rec['lift']:+.1%} vs {control} "
-               f"(z {rec['z']:.2f} >= O'Brien-Fleming/Holm bound {rec['boundary']:.2f}, "
-               f"n {rec['n_arm']:.0f} vs {rec['n_ctrl']:.0f}); {control} stays at {settings.EXP_HOLDOUT:.0%} as holdout")
+    summary = (f"Promote {winner} for {dim} ({wf_scope}) to stage 1 ({weights_text(weights)}): lift {rec['lift']:+.1%} vs "
+               f"{control} (z {rec['z']:.2f} >= O'Brien-Fleming/Holm bound {rec['boundary']:.2f}, "
+               f"n {rec['n_arm']:.0f} vs {rec['n_ctrl']:.0f}); {control} keeps {1 - weights[winner]:.0%} as a concurrent control")
     rationale = (f"{summary}. Recent 24h lift lower bound {rec.get('recent_lb', float('nan')):+.1%} > 0 "
                  f"(not decaying); pickup guardrail non-inferior (drop upper bound "
-                 f"{rec['pickup']['drop_upper']:+.3f} <= {rec['pickup']['margin']}). New split {weights_text(weights)}.")
+                 f"{rec['pickup']['drop_upper']:+.3f} <= {rec['pickup']['margin']}). Stage 2 ({1 - settings.EXP_HOLDOUT:.0%} / "
+                 f"{settings.EXP_HOLDOUT:.0%} holdout) follows only after >= 24 h here with a positive recent lower bound "
+                 "and a still-positive concurrent contrast; the decay test runs meanwhile.")
     return summary[:300], rationale
+
+
+def stage2(dim: str, winner: str, control: str, why: str, weights: Mapping[str, float]) -> tuple[str, str]:
+    summary = f"Promote {winner} for {dim} to stage 2 ({weights_text(weights)}): {why}"
+    return summary[:300], summary + ". Concurrent holdout stays on the old control for the decay test."
 
 
 def harm_stop(dim: str, arm: str, rec: Mapping) -> tuple[str, str]:
