@@ -158,7 +158,7 @@ def test_observed_arms_give_a_ci_and_bounded_impact(ingested):
     e = d.dry_run["allocations"][0]
     assert e["evidence"] == "observed" and len(e["ci95_new"]) == 2 and e["ci95_new"][0] <= e["expected_new"]
     assert 0 <= d.impact_score <= 1
-    assert d.tv == {"default/caller_id": pytest.approx(0.4), "hi/caller_id": pytest.approx(0.4)} or d.tv
+    assert d.tv["default/caller_id"] == pytest.approx(0.4) and d.max_shift == pytest.approx(0.4)
 
 
 def test_prompt_change_is_validation_only_and_schedule_has_replay(ingested):
