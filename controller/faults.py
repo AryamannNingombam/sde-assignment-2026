@@ -3,7 +3,7 @@
 ``CRASH_AT=<point>:<n>`` makes the n-th hit (default 1) of the named point call
 ``os._exit`` so no ``finally``/``atexit`` handler runs, exactly like ``kill -9``.
 Points: mid-ingest-txn, after-submit-before-record, after-apply-before-record,
-after-advance-before-ingest.
+after-advance-before-ingest, after-credit-call-before-record.
 """
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ import os
 from typing import Callable
 
 POINTS = ("mid-ingest-txn", "after-submit-before-record", "after-apply-before-record",
-          "after-advance-before-ingest")
+          "after-advance-before-ingest",
+          "after-credit-call-before-record")
 CRASH_EXIT_CODE = 137
 
 _hits: dict[str, int] = {}

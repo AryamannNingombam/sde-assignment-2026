@@ -14,12 +14,14 @@ from dataclasses import dataclass, field
 from . import settings
 from .client import AdvanceNotApplied, Finished, SimClient
 from . import levers  # noqa: F401  (registers the Phase 3 detectors on the default registry)
+from .credits import reconcile_ledger
 from .desired import DEFAULT_REGISTRY, Registry
 from .faults import crash_point
 from .alerts import TickObserver
 from .governance import Governance
 from .planner import Planner
 from .ingest import IngestStats, Ingestor, mirror_configs
+from . import metrics
 from .store import Store
 from .world_id import note_progress
 
@@ -95,6 +97,7 @@ class Controller:
         self._advance_returned = time.monotonic()
         self._last_state: dict = {}
         self._saw_finished = False
+        self._phases: dict[str, float] = {}
         self.observer = TickObserver(client, store)
 
     # ------------------------------------------------------------ startup
@@ -112,6 +115,7 @@ class Controller:
         self.planner = Planner(self.client, self.store, self.gov, self.registry)
         self.gov.veto_check = lambda row, now: self.registry.veto(self.planner.context(now), row.workflow_id, row.kind)
         self.gov.reconcile(state["sim_minute"])  # resolve anything a previous run left in flight
+        reconcile_ledger(self.client, self.store, state["sim_minute"])
         stats = self.ingestor.sync()
         self.store.add_decision(state["sim_minute"], "startup",
                                 f"startup: ingested {stats.events} events in {stats.chunks} chunks",
@@ -124,11 +128,15 @@ class Controller:
     def in_flight(self) -> bool:
         return self.gov is not None and self.gov.any_in_flight()
 
-    def plan_and_submit(self, now: int) -> None:
+    def plan_and_submit(self, now: int, phases: dict[str, float] | None = None) -> None:
         """Detectors, planner and submission (steps 4-6 of the tick)."""
         assert self.planner is not None
+        t = time.perf_counter()
         self.planner.run_detectors(now)
+        t2 = time.perf_counter()
         self.planner.plan(now)
+        if phases is not None:
+            phases["detect_s"], phases["plan_s"] = t2 - t, time.perf_counter() - t2
 
     def tick(self) -> tuple[bool, IngestStats]:
         """One loop iteration. Returns ``(finished_and_drained, stats)``."""
@@ -138,17 +146,26 @@ class Controller:
         assert self.gov is not None
         now = state["sim_minute"]
         finished = state["finished"]
+        ph: dict[str, float] = {}
+        t = time.perf_counter()
         self.gov.reconcile(now)
+        ph["reconcile_s"] = time.perf_counter() - t
+        t = time.perf_counter()
         stats = self.ingestor.sync()
+        ph["ingest_s"] = time.perf_counter() - t
         if not finished:
+            t = time.perf_counter()
             self.gov.apply_approved(now)
-            self.plan_and_submit(now)
+            ph["apply_s"] = time.perf_counter() - t
+            self.plan_and_submit(now, ph)
+        self._phases = ph
         hit_stop = self.stop_at_minute is not None and state["sim_minute"] >= self.stop_at_minute
         step = 0
         if not (finished or hit_stop):
             step = choose_step(state["sim_minute"], state["end_minute"], self.windows,
                                self.in_flight(), state.get("tick_minutes", settings.TICK_MINUTES))
         self._record_metrics(state["sim_minute"], stats, t0, step)
+        metrics.record_phases(self.store, now, self._phases)
         self.observer.after_tick(state, now)  # metrics_ext + alert rules (never raises)
         if finished:
             self.store.add_decision(state["sim_minute"], "finished", "scenario finished; exiting 0")

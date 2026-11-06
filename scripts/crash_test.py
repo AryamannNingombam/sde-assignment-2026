@@ -34,8 +34,10 @@ sys.path.insert(0, str(ROOT))
 from controller.faults import CRASH_EXIT_CODE, POINTS  # noqa: E402  (dev tooling may import controller)
 
 # n-th hit of each point inside one controller process; spread so the points hit different moments
-POINT_HITS = {"mid-ingest-txn": 3, "after-advance-before-ingest": 40, "after-submit-before-record": 1,
-              "after-apply-before-record": 1}
+# Several hits per point: later hits land on later proposals (experiment entries/updates, DID probes, incident fixes).
+POINT_HITS = {"mid-ingest-txn": [3, 150], "after-advance-before-ingest": [40, 200],
+              "after-submit-before-record": [1, 2, 3, 5], "after-apply-before-record": [1, 2, 3],
+              "after-credit-call-before-record": [1, 2]}
 TERMINAL_OK = {"APPLIED": {"applied"}, "MONITORING": {"applied"}, "CLOSED": {"applied", "rejected", "expired"},
                "AUTO_APPLIED": set(), "REJECTED": {"rejected"}, "EXPIRED": {"expired"},
                "STALE": {"approved", "pending", "rejected", "expired", "applied"},
@@ -99,12 +101,30 @@ def read_cursor(state_dir: Path) -> int | None:
     return row[0] if row else None
 
 
+def last_proposal(state_dir: Path) -> str:
+    path = db_file(state_dir)
+    if path is None:
+        return "-"
+    con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        r = con.execute("SELECT proposal_id, kind, state, route FROM proposals ORDER BY created_minute DESC,"
+                        " plan_seq DESC LIMIT 1").fetchone()
+        n = con.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
+    except sqlite3.Error:
+        r, n = None, 0
+    finally:
+        con.close()
+    return f"{r} (total proposals {n})" if r else "none yet"
+
+
 class Runner:
     def __init__(self, url: str, state_dir: Path, log: Log, per_run_timeout_s: float) -> None:
         self.url, self.state_dir, self.log, self.timeout = url, state_dir, log, per_run_timeout_s
         self.cursors: list[int] = []
         self.restarts = 0
         self.kills_delivered = 0
+        self.fired = 0
+        self.attempted = 0
 
     def _spawn(self, env_extra: dict | None) -> subprocess.Popen:
         cmd = [sys.executable, "-m", "controller", "run", "--url", self.url, "--state-dir", str(self.state_dir)]
@@ -131,6 +151,9 @@ class Runner:
         fired = rc == CRASH_EXIT_CODE
         self.log(f"KILL POINT {point}: {'FIRED (os._exit)' if fired else 'did NOT fire'}")
         self._after(f"after {spec}", rc)
+        self.log(f"  last proposal row: {last_proposal(self.state_dir)}")
+        self.fired += int(fired)
+        self.attempted += 1
         return rc
 
     def run_random_kill(self, rng: random.Random, lo: float, hi: float) -> int | None:
@@ -225,6 +248,20 @@ def invariants(url: str, state_dir: Path, run_dir: Path, baseline: Path, runner:
     cur = read_cursor(state_dir)
     out.append(("ingest cursor monotonic across restarts and == sim last_event_id at the end",
                 mono and cur == last, f"cursors={runner.cursors} final={cur} sim={last}"))
+    # 6. credits ledger reconciles with /sim/state (kills inside credit-costing calls included)
+    try:
+        initial = float(con.execute("SELECT value FROM meta WHERE key='credits_initial'").fetchone()[0])
+        booked = con.execute("SELECT COALESCE(SUM(credits),0) FROM llm_calls").fetchone()[0]
+        unrec = con.execute("SELECT COALESCE(SUM(credits),0) FROM llm_calls WHERE response='unrecorded'").fetchone()[0]
+        sim_left = http.get("/sim/state").json()["credits_remaining"]
+        out.append(("credits ledger reconciles: sum(llm_calls.credits) == initial - sim credits_remaining",
+                    abs(initial - sim_left - booked) < 0.01,
+                    f"initial={initial} sim_remaining={sim_left} ledger={booked:.2f} of which unrecorded-at-crash={unrec:.2f}"))
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        out.append(("credits ledger reconciles", False, f"cannot read ledger: {exc}"))
+    kinds = [r[0] for r in con.execute("SELECT kind FROM proposals")]
+    out.append(("experiments were active (experiment_* proposals exist for the kills to land on)",
+                any(k.startswith("experiment") for k in kinds), f"kinds={sorted(set(kinds))}"))
     con.close()
     return out
 
@@ -232,7 +269,7 @@ def invariants(url: str, state_dir: Path, run_dir: Path, baseline: Path, runner:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="scenarios/public_02_incidents.yaml")
-    ap.add_argument("--random-kills", type=int, default=3)
+    ap.add_argument("--random-kills", type=int, default=10)
     ap.add_argument("--points", nargs="*", default=list(POINTS))
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--kill-min-s", type=float, default=4)
@@ -269,7 +306,8 @@ def main() -> int:
         runner = Runner(url, state_dir, log, args.point_timeout_s)
         rng = random.Random(args.seed)
         for point in args.points:
-            runner.run_fault(point, POINT_HITS.get(point, 1))
+            for hits in POINT_HITS.get(point, [1]):
+                runner.run_fault(point, hits)
         for _ in range(args.random_kills):
             runner.run_random_kill(rng, args.kill_min_s, args.kill_max_s)
         rc = runner.run_to_completion()
@@ -277,6 +315,8 @@ def main() -> int:
         state = httpx.get(url + "/sim/state", timeout=30).json()
         log(f"sim state: finished={state['finished']} sim_minute={state['sim_minute']}")
         results = invariants(url, state_dir, run_dir, baseline, runner)
+        results.insert(0, ("every named fault point fired", runner.fired == runner.attempted,
+                           f"fired={runner.fired} of {runner.attempted}"))
         results.insert(0, (f"all {args.random_kills} random kills were delivered mid-run (test validity)",
                            runner.kills_delivered == args.random_kills, f"delivered={runner.kills_delivered}"))
         results.insert(0, ("run completed: controller exit 0 and sim finished", rc == 0 and state["finished"],
