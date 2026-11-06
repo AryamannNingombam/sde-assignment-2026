@@ -192,7 +192,8 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         cur = dist(cfg[1], key, "caller_id")
         target = did_plan.target_allocation(cur, status, h_bar(ev, cur))
         step = did_plan.plan_step(cur, target, limit, status)
-        if did_plan.tv(cur, step) < settings.DID_MIN_TV:
+        floor = settings.DID_MIN_TV if limit is not None else settings.DID_MIN_TV_APPROVAL
+        if did_plan.tv(cur, step) < floor and not (set(step) - set(cur)):  # a new DID is always worth it
             continue
         patch.setdefault("allocations", {}).setdefault(key, {})["caller_id"] = step
         notes.append(f"{key}: " + ", ".join(f"{d} {cur.get(d, 0):.1%}->{step.get(d, 0):.1%}"

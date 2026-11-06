@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from . import settings
 from .client import AdvanceNotApplied, Finished, SimClient
+from . import levers  # noqa: F401  (registers the Phase 3 detectors on the default registry)
 from .desired import DEFAULT_REGISTRY, Registry
 from .faults import crash_point
 from .governance import Governance

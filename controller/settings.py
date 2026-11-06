@@ -6,8 +6,8 @@ Nothing here is derived from simulator ground truth. Values that are priors
 from __future__ import annotations
 
 # --- Feature flags: every lever stays OFF until its phase is green -----------
-ENABLE_DID = False  # turned ON at the end of Phase 3 (see bottom of file for the final values)
-ENABLE_HALLUC = False
+ENABLE_DID = True  # Phase 3 green
+ENABLE_HALLUC = True  # Phase 3 green
 ENABLE_SCHEDULE = False
 ENABLE_EXPERIMENTS = False
 ENABLE_PERSON_ANALYSIS = False
@@ -69,7 +69,9 @@ DID_FATIGUE_TAU_GRID_DAYS = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0)  # decay window
 DID_CURVE_MIN_OBS = 8  # (DID, day) observations needed before a curve is trusted; else flat
 DID_FLAG_WINDOWS_HOURS = (1, 2, 3)  # rolling windows for the step test (3 h as in CONTEXT C5)
 DID_FLAG_MIN_DIALS = 150  # each side of the step test
-DID_FLAG_P = 0.001
+# CONTEXT C5 says p < 0.001 per test; the test is repeated every tick on 3 overlapping windows (~100
+# looks/DID-day), so the per-look level is tightened (Bonferroni-style) to keep false flags rare.
+DID_FLAG_P = 1e-5
 DID_FLAG_MIN_DROP = 0.30  # relative pickup-ratio drop that counts as a step (effect-size gate)
 DID_FLAG_REF_HOURS = 24  # "prior day"
 DID_FLAG_SHARE_BAND = (0.5, 2.0)  # share must be roughly unchanged between window and reference
@@ -82,7 +84,8 @@ DID_WEAK_MARGIN = 0.20  # weak base: significantly below (1 - margin) x expected
 DID_WEAK_WINDOW_HOURS = 48
 DID_WEAK_LOAD_SLACK = 1.25  # "comparable load": own load <= peers' load x slack
 DID_STEP_SAFETY = 0.95  # use at most this fraction of max_shift per auto-apply step
-DID_MIN_TV = 0.005  # smaller allocation moves are not worth a change
+DID_MIN_TV = 0.005  # smaller allocation moves are not worth an auto-apply
+DID_MIN_TV_APPROVAL = 0.03  # ... nor an approval request (one of the scarce daily slots)
 DID_EVAL_MIN_DIALS_ACTIVE = 1  # evaluate only when the window has dials
 
 # --- C8 hallucination incidents ---------------------------------------------------------
@@ -90,7 +93,6 @@ HALLUC_VALIDATION_N = 300
 HALLUC_P = 0.001
 HALLUC_MIN_CONNECTS = 200
 HALLUC_ADHERENCE_DROP = 0.02
-HALLUC_ADHERENCE_Z = 3.0
 HALLUC_WINDOW_MINUTES = 1440  # rolling window for drift
 HALLUC_VERIFY_MIN_CONNECTS = 200
 HALLUC_VERIFY_P = 0.01

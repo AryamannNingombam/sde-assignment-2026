@@ -87,3 +87,48 @@ def test_healthy_fleet_probes_the_unused_did_and_spreads(tmp_path, monkeypatch):
     assert not (BAD_KINDS & set(kinds))
     store.close()
     http.__exit__(None, None, None)
+
+
+def test_persistently_weak_did_is_never_ramped_and_is_removed(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_DID", True)
+    world = build(tmp_path, ("ks_cancel",), days=5, history_days=6, did_base_health={"D3": 0.4})
+    client, http = make_client(world)
+    store = Store(tmp_path / "state" / "w.db")
+    reg = Registry()
+    did.register(reg)
+    ctl = Controller(client, store, registry=reg)
+    ctl.startup()
+    did_data.forget()
+    peak = 0.0
+    try:
+        while client.state()["sim_minute"] < when(4, 20):
+            ctl.tick()
+            peak = max(peak, client.get_config("ks_cancel")["config"]["allocations"]["default"]["caller_id"].get("D3", 0.0))
+        assert peak <= 0.06  # probe cap only: a weak base never earns more traffic
+        weak = store.conn.execute("select inputs from decisions where kind='did_weak_base'").fetchall()
+        assert weak, "weak base never recognised"
+        assert client.get_config("ks_cancel")["config"]["allocations"]["default"]["caller_id"].get("D3", 0.0) == 0.0
+        assert store.conn.execute("select count(*) from decisions where kind='did_flagged'").fetchone()[0] == 0
+    finally:
+        store.close()
+        http.__exit__(None, None, None)
+
+
+def test_cold_start_without_history_makes_no_changes_until_data_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_DID", True)
+    world = build(tmp_path, ("ks_cancel",), days=3, history_days=0)
+    client, http = make_client(world)
+    store = Store(tmp_path / "state" / "c.db")
+    reg = Registry()
+    did.register(reg)
+    ctl = Controller(client, store, registry=reg)
+    ctl.startup()
+    did_data.forget()
+    try:
+        run_to(ctl, client, when(0, 8))
+        assert client.get_config("ks_cancel")["version"] == 1  # nothing known yet: nothing changed
+        run_to(ctl, client, when(2, 0))
+        assert store.conn.execute("select count(*) from alerts where severity='error'").fetchone()[0] == 0
+    finally:
+        store.close()
+        http.__exit__(None, None, None)
