@@ -1,7 +1,7 @@
 """Hallucination-incident detector and producer (CONTEXT C8), behind ``settings.ENABLE_HALLUC``.
 
 Per workflow, each tick: (1) Day-0 validation of the live prompt, (2) one-sided two-proportion
-test of the current prompt segment's flag rate against the last known-good prompt's, (3) fix
+test of the live prompt's flag rate against the last known-good prompt's, (3) fix
 selection (revert to our own known-good prompt using its validation run; only if none, ask the
 LLM for candidates and rank validated ones by the lowest failure upper bound), (4) verification
 after the fix is applied (flag rate back to baseline, engagement inside the guardrail), (5) close.
@@ -16,9 +16,10 @@ from .. import settings
 from ..credits import call_with_credit_ledger
 from ..client import OutcomeUnknown, SimUnavailable
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, DesiredChange, PlanContext, Priority
-from ..incidents import (can_spend, close_incident, open_incident, open_incidents, recover_validations,
-                         run_validation, update_incident, validation_cost, validation_for)
-from ..stats import two_prop_z, wilson_upper
+from ..incidents import (can_spend, close_incident, daily_cap_ok, open_incident, open_incidents, pick_validation_n,
+                         recover_validations, run_validation, update_incident, validation_cost, validation_for,
+                         validations_of)
+from ..stats import non_inferior, rate_greater_test, wilson_lower, wilson_upper
 from . import halluc_data as hd
 from .common import latest_config, load_state, save_state
 
@@ -45,18 +46,28 @@ def _max_engagement_drop(wf: Mapping) -> float:
 
 
 # ------------------------------------------------------------------ the statistical test
+def _ceiling(wf: Mapping) -> float:
+    """Highest flag rate the workflow's own governance accepts: a fix needs validation pass >= min_pass."""
+    return 1.0 - _wf_min_pass(wf)
+
+
 def segment_test(seg: list, base: list, alpha: float = settings.HALLUC_P) -> dict:
-    """Is the segment's flag rate above the baseline's? (one-sided two-proportion test)."""
-    z, p = two_prop_z(seg[1], seg[0], base[1], base[0], alternative="greater")
+    """Is the prompt's flag rate above the baseline's? Exact Fisher for small counts, pooled z otherwise."""
+    p = rate_greater_test(seg[1], seg[0], base[1], base[0])
     seg_adh = seg[2] / seg[0] if seg[0] else 0.0
     base_adh = base[2] / base[0] if base[0] else 0.0
-    adh_drop = base_adh - seg_adh
-    corroborated = adh_drop >= settings.HALLUC_ADHERENCE_DROP
-    triggered = seg[0] >= settings.HALLUC_MIN_CONNECTS and (
-        p < alpha or (p < 10 * alpha and corroborated))
-    return {"n": seg[0], "flags": seg[1], "rate": _rate(seg), "base_n": base[0], "base_rate": _rate(base),
-            "z": round(z, 3), "p": p, "adherence_drop": round(adh_drop, 4), "corroborated": corroborated,
+    triggered = seg[0] >= settings.HALLUC_MIN_CONNECTS and p < alpha
+    return {"n": seg[0], "flags": seg[1], "rate": _rate(seg), "rate_lb": round(wilson_lower(seg[1], seg[0], 3.09), 5),
+            "base_n": base[0], "base_rate": _rate(base), "p": p, "adherence_drop": round(base_adh - seg_adh, 4),
             "triggered": triggered}
+
+
+def ceiling_test(seg: list, ceiling: float) -> dict:
+    """Baseline-free: the flag-rate lower bound (one-sided p<0.001) is above the governance ceiling."""
+    lb = wilson_lower(seg[1], seg[0], settings.Z_ONE_SIDED_P001)
+    return {"n": seg[0], "flags": seg[1], "rate": _rate(seg), "rate_lb": round(lb, 5), "base_n": 0,
+            "base_rate": ceiling, "p": 0.0, "adherence_drop": 0.0,
+            "triggered": seg[0] >= settings.HALLUC_MIN_CONNECTS and lb > ceiling}
 
 
 def engagement_ok(seg: list, base: list, max_drop: float) -> tuple[bool, dict]:
@@ -77,31 +88,77 @@ def rank_by_failure_bound(runs: list[dict], min_pass: float) -> list[dict]:
     return sorted(ok, key=lambda r: (r["fail_ub"], r["prompt"]))
 
 
+def _failures(run: Mapping) -> int:
+    return round((1 - run["pass_rate"]) * run["n"])
+
+
 # ------------------------------------------------------------------ Day-0 validation
+def _day0_n(ctx: PlanContext, wid: str, pending: int) -> int | None:
+    """Day-0 validation draws from the INCIDENT credit rule: only the real credit balance (minus what the
+    other pending Day-0 runs need at the minimum size) and the per-workflow daily cap limit it."""
+    floor = validation_cost(settings.HALLUC_VALIDATION_N_STEPS[-1]) * max(pending - 1, 0)
+    n = pick_validation_n(ctx.client.credits_remaining(), floor)
+    while n is not None and not daily_cap_ok(ctx.store, wid, ctx.now, validation_cost(n)):
+        smaller = [k for k in settings.HALLUC_VALIDATION_N_STEPS if k < n]
+        n = smaller[0] if smaller else None
+    return n
+
+
 def day0_validation(ctx: PlanContext) -> None:
     store = ctx.store
     if str(store.path) not in _RECOVERED:
         recover_validations(store)
         _RECOVERED.add(str(store.path))
-    for wid in sorted(ctx.workflows):
+    todo = [w for w in sorted(ctx.workflows) if store.get_job("halluc_day0", w) is None]
+    for wid in todo:
         cfg = latest_config(store, wid)
-        if cfg is None or store.get_job("halluc_day0", wid) is not None:
+        if cfg is None:
             continue
         live = cfg[1]["prompt_version"]
         if validation_for(store, wid, live) is not None:
             store.set_job("halluc_day0", wid, ctx.now)
             continue
-        if not can_spend(ctx.client.credits_remaining(), validation_cost(settings.HALLUC_VALIDATION_N),
-                         len(ctx.workflows)):
-            store.add_alert(ctx.now, "warn", "day0_validation_skipped", "credit reserve would be breached", wid)
+        n = _day0_n(ctx, wid, len(todo))
+        if n is None:
+            store.add_alert(ctx.now, "warn", "day0_validation_skipped", "credits cannot cover a minimum validation", wid)
             continue
         store.set_job("halluc_day0", wid, ctx.now)  # one paid attempt, never a retry loop
-        run_validation(ctx.client, store, wid, live, ctx.now)
+        run_validation(ctx.client, store, wid, live, ctx.now, n)
+    for wid in sorted(ctx.workflows):
+        _confirm_day0(ctx, wid)
+
+
+def _day0_verdict(runs: list[dict], min_pass: float) -> dict | None:
+    """None when some validation passes the bar; else the pooled evidence and whether it is conclusive."""
+    if not runs or max(r["pass_rate"] for r in runs) >= min_pass:
+        return None
+    n, fails = sum(r["n"] for r in runs), sum(_failures(r) for r in runs)
+    upper_pass = 1.0 - wilson_lower(fails, n)
+    return {"n": n, "flags": fails, "rate": fails / n, "rate_lb": round(wilson_lower(fails, n), 5),
+            "definite": upper_pass < min_pass, "confirmed": len(runs) >= 2, "runs": len(runs)}
+
+
+def _confirm_day0(ctx: PlanContext, wid: str) -> None:
+    """A single borderline-failing validation is re-run once (incident credit rule) before it can open anything."""
+    cfg = latest_config(ctx.store, wid)
+    if cfg is None or open_incidents(ctx.store, wid, KIND):
+        return
+    live = cfg[1]["prompt_version"]
+    verdict = _day0_verdict(validations_of(ctx.store, wid, live), _wf_min_pass(ctx.workflows[wid]))
+    key = f"{wid}:{live}"
+    if verdict is None or verdict["definite"] or verdict["confirmed"] or ctx.store.get_job("halluc_confirm", key) is not None:
+        return
+    n = _day0_n(ctx, wid, 1)
+    if n is None:
+        return
+    ctx.store.set_job("halluc_confirm", key, ctx.now)
+    run_validation(ctx.client, ctx.store, wid, live, ctx.now, n)
 
 
 # ------------------------------------------------------------------ fix selection
-def _spend_ok(ctx, body: dict, cost: float) -> bool:
-    return can_spend(ctx.client.credits_remaining(), cost, len(ctx.workflows), incident_spent=body["credits_spent"])
+def _spend_ok(ctx, wid: str, body: dict, cost: float) -> bool:
+    return (can_spend(ctx.client.credits_remaining(), cost, len(ctx.workflows), incident_spent=body["credits_spent"])
+            and daily_cap_ok(ctx.store, wid, ctx.now, cost))
 
 
 def _validated(ctx, wid: str, prompt: str, body: dict, min_pass: float) -> dict | None:
@@ -109,7 +166,7 @@ def _validated(ctx, wid: str, prompt: str, body: dict, min_pass: float) -> dict 
     run = validation_for(ctx.store, wid, prompt)
     if run is None:
         cost = validation_cost(settings.HALLUC_VALIDATION_N)
-        if not _spend_ok(ctx, body, cost):
+        if not _spend_ok(ctx, wid, body, cost):
             return None
         raw = run_validation(ctx.client, ctx.store, wid, prompt, ctx.now)
         body["credits_spent"] += cost
@@ -124,13 +181,24 @@ def _candidate(prompt: str, run: dict, source: str) -> dict:
             "source": source}
 
 
+def _revert_is_clearly_better(counts: list, live_rate_lb: float | None) -> bool:
+    """A revert target's historical flag-rate upper bound must lie below the live prompt's lower bound."""
+    if live_rate_lb is None:
+        return True
+    return wilson_upper(counts[1], counts[0]) < live_rate_lb
+
+
 def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str) -> None:
     """Fill ``body['candidates']`` / ``body['target']``: revert first; LLM only if none exists."""
     min_pass = _wf_min_pass(ctx.workflows[wid])
     tried = set(body["tried"])
     if not body["candidates"] and not body["reverts_checked"]:
         body["reverts_checked"] = True
-        for prompt, counts in hd.known_good_candidates(st, live):
+        lb = body["stats"].get("rate_lb")
+        for prompt, counts in hd.known_good_candidates(st, live, ctx.now):
+            if not _revert_is_clearly_better(counts, lb):
+                body.setdefault("rejected_reverts", []).append(prompt)
+                continue
             run = _validated(ctx, wid, prompt, body, min_pass)
             if run is not None:
                 cand = _candidate(prompt, run, "known_good")
@@ -147,7 +215,7 @@ def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str) 
 
 
 def _suggest(ctx: PlanContext, wid: str, body: dict, live: str, min_pass: float) -> None:
-    if not _spend_ok(ctx, body, settings.SUGGEST_FIXES_COST):
+    if not _spend_ok(ctx, wid, body, settings.SUGGEST_FIXES_COST):
         ctx.store.add_alert(ctx.now, "error", "suggest_fixes_unaffordable", "incident credit budget exhausted", wid)
         return
     s = body["stats"]
@@ -181,24 +249,24 @@ def _edit_of_live_prompt(store, wid: str) -> dict:
     return {"version": row[0], "actor": row[1], "minute": row[2]} if row else {}
 
 
-def _baseline(st: Mapping, live: str) -> tuple[list | None, str | None, str]:
+def _baseline(st: Mapping, live: str, now: int) -> tuple[list | None, str | None, str]:
     """(counts, prompt, source): the first prompt's frozen baseline, else the newest known-good."""
     if live == st["first_prompt"] and st["base_frozen"]:
         return st["base"], live, "history" if st["base"][0] else "cold_start"
-    cands = hd.known_good_candidates(st, live)
+    cands = hd.known_good_candidates(st, live, now)
     return (cands[0][1], cands[0][0], "known_good") if cands else (None, None, "")
 
 
 def _new_body(live: str, base_prompt: str | None, test: dict, edit: dict, kind: str) -> dict:
     return {"kind": kind, "bad_prompt": live, "baseline_prompt": base_prompt, "stats": test, "edit": edit,
             "candidates": [], "tried": [], "target": None, "reverts_checked": False, "suggested": False,
-            "credits_spent": 0.0}
+            "credits_spent": 0.0, "holds": True, "recheck_fail": 0}
 
 
 def _open(ctx, wid: str, st: dict, live: str, base_prompt, test: dict, kind: str) -> None:
     edit = _edit_of_live_prompt(ctx.store, wid)
     body = _new_body(live, base_prompt, test, edit, kind)
-    st["bad"] = sorted(set(st["bad"]) | {live})
+    hd.mark_bad(st, live, ctx.now, kind)
     hd.save(ctx.store, wid, st)
     inc_id = open_incident(ctx.store, wid, KIND, ctx.now, body)
     ctx.store.add_alert(ctx.now, "warn", "halluc_incident",
@@ -207,51 +275,114 @@ def _open(ctx, wid: str, st: dict, live: str, base_prompt, test: dict, kind: str
     update_incident(ctx.store, inc_id, body)
 
 
-def _detect(ctx: PlanContext, wid: str, st: dict, live: str) -> None:
-    seg = st["seg"]
-    if seg is None or seg["prompt"] != live:
-        return
-    run = validation_for(ctx.store, wid, live)
-    if run is not None and run["pass_rate"] < _wf_min_pass(ctx.workflows[wid]) and live not in st["bad"]:
-        test = {"n": run["n"], "flags": round((1 - run["pass_rate"]) * run["n"]), "rate": 1 - run["pass_rate"],
-                "base_n": 0, "base_rate": 0.0, "z": 0.0, "p": 0.0, "adherence_drop": 0.0, "corroborated": False,
-                "triggered": True, "validation_run_id": run["run_id"], "validation_pass_rate": run["pass_rate"]}
-        _open(ctx, wid, st, live, None, test, "bad_prompt_day0")
-        return
-    base, base_prompt, source = _baseline(st, live)
-    if base is None:
-        return
-    alpha = settings.HALLUC_P_DRIFT if base_prompt == live else settings.HALLUC_P
-    test = segment_test(hd.window_counts(st, ctx.now), base, alpha)
-    test["baseline_source"] = source
-    if ctx.now % 60 < settings.TICK_MINUTES:  # hourly audit row
+def _production_spike(ctx, wid: str, st: Mapping, live: str) -> tuple[dict, str | None, str] | None:
+    """Spike test on the live prompt's own rolling bucket: relative to a baseline, else/also absolute."""
+    win = hd.window_counts(st, live, ctx.now)
+    ceiling = _ceiling(ctx.workflows[wid])
+    base, base_prompt, source = _baseline(st, live, ctx.now)
+    test = None
+    if base is not None:
+        alpha = settings.HALLUC_P_DRIFT if base_prompt == live else settings.HALLUC_P
+        test = segment_test(win, base, alpha)
+        test["baseline_source"] = source
+    ceil = ceiling_test(win, ceiling)
+    if ctx.now % 60 < settings.TICK_MINUTES and test is not None:  # hourly audit row
         ctx.store.add_decision(ctx.now, "halluc_eval", f"{live}: flags {test['rate']:.2%} vs {test['base_rate']:.2%}"
-                               f" (n={test['n']}, p={test['p']:.2e})", wid, {**test, "prompt": live, "segment_start": seg["start"]})
-    if test["triggered"] and live not in st["bad"]:
-        _open(ctx, wid, st, live, base_prompt, test, "prompt_flag_spike")
+                               f" (n={test['n']}, p={test['p']:.2e}, ceiling {ceiling:.1%})", wid,
+                               {**test, "prompt": live, "ceiling": ceiling})
+    if test is not None and test["triggered"]:
+        return test, base_prompt, "prompt_flag_spike"
+    if ceil["triggered"]:
+        ceil["baseline_source"] = "governance_ceiling"
+        return ceil, None, "prompt_flag_ceiling"
+    return None
+
+
+def _detect_day0(ctx, wid: str, st: dict, live: str) -> bool:
+    """Open a Day-0 incident only on conclusive evidence; else record 'inconclusive' and monitor."""
+    verdict = _day0_verdict(validations_of(ctx.store, wid, live), _wf_min_pass(ctx.workflows[wid]))
+    if verdict is None:
+        return False
+    corroborated = _production_spike(ctx, wid, st, live) is not None
+    if not (verdict["definite"] or verdict["confirmed"] or corroborated):
+        if st["day0"].get(live) != "inconclusive":
+            st["day0"][live] = "inconclusive"
+            hd.save(ctx.store, wid, st)
+            ctx.store.add_decision(ctx.now, "day0_inconclusive", f"{live}: one borderline validation failure "
+                                   f"({verdict['flags']}/{verdict['n']}); confirming and monitoring", wid, verdict)
+        return False
+    test = {**verdict, "base_n": 0, "base_rate": 0.0, "p": 0.0, "adherence_drop": 0.0, "triggered": True,
+            "validation_pass_rate": 1 - verdict["rate"],
+            "evidence": "definite" if verdict["definite"] else "confirmed" if verdict["confirmed"] else "production"}
+    _open(ctx, wid, st, live, None, test, "bad_prompt_day0")
+    return True
+
+
+def _detect(ctx: PlanContext, wid: str, st: dict, live: str) -> None:
+    if hd.is_bad(st, live, ctx.now):
+        return
+    if ctx.now - st.get("cleared", {}).get(live, -10**9) < settings.HALLUC_REOPEN_COOLDOWN_MINUTES:
+        return
+    if _detect_day0(ctx, wid, st, live):
+        return
+    spike = _production_spike(ctx, wid, st, live)
+    if spike is not None:
+        test, base_prompt, kind = spike
+        _open(ctx, wid, st, live, base_prompt, test, kind)
+
+
+def _recheck(ctx, wid: str, inc: dict, st: dict, live: str) -> None:
+    """While the bad prompt is still live: does the evidence still hold? Repeated failures close a false alarm."""
+    body = inc["body"]
+    if body["kind"] == "bad_prompt_day0":
+        return
+    spike = _production_spike(ctx, wid, st, live)
+    win_n = hd.window_counts(st, live, ctx.now)[0]
+    if spike is not None:
+        body["holds"], body["recheck_fail"] = True, 0
+    elif win_n >= settings.HALLUC_MIN_CONNECTS:
+        body["holds"], body["recheck_fail"] = False, body.get("recheck_fail", 0) + 1
+    else:
+        return
+    if body["recheck_fail"] >= settings.HALLUC_RECHECK_FAILS:
+        hd.lift_bad(st, live)
+        st.setdefault("cleared", {})[live] = ctx.now
+        hd.save(ctx.store, wid, st)
+        ctx.store.add_decision(ctx.now, "halluc_false_alarm", f"{live}: spike no longer holds on {win_n} connects;"
+                               " incident closed, prompt blacklist lifted", wid, {"prompt": live, "n": win_n})
+        close_incident(ctx.store, inc["id"], ctx.now, f"false alarm: {live} no longer exceeds its baseline")
+        return
+    update_incident(ctx.store, inc["id"], body)
 
 
 def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
-    body, seg = inc["body"], st["seg"]
-    if seg is None or seg["prompt"] != live or seg["c"][0] < settings.HALLUC_VERIFY_MIN_CONNECTS:
+    """Non-inferiority of the fix's flag rate at adequate n, plus the engagement guardrail."""
+    body = inc["body"]
+    new = hd.counts_since(st, live, inc["opened_minute"])
+    if new[0] < settings.HALLUC_VERIFY_MIN_CONNECTS:
         return
-    done = st["done"].get(body.get("baseline_prompt") or "")
-    base_counts = done["c"] if done else st["base"]
-    if body.get("baseline_prompt") is None:  # Day-0 incident: compare with the bad prompt's own rate
-        z, p = two_prop_z(seg["c"][1], seg["c"][0], body["stats"]["flags"], body["stats"]["n"], "less")
-        flags_ok = p < 0.05
-        base_counts = seg["c"]
+    wf = ctx.workflows[wid]
+    margin = _ceiling(wf) * settings.HALLUC_FLAG_MARGIN_FRACTION
+    base_prompt = body.get("baseline_prompt")
+    eng_ok, eng, p = True, {}, 0.0
+    if base_prompt is None:  # absolute incident: the fix must sit under the governance ceiling
+        flags_ok = wilson_upper(new[1], new[0], 1.645) <= _ceiling(wf)
     else:
-        z, p = two_prop_z(seg["c"][1], seg["c"][0], base_counts[1], base_counts[0], "greater")
-        flags_ok = p >= settings.HALLUC_VERIFY_P
-    eng_ok, eng = engagement_ok(seg["c"], base_counts, _max_engagement_drop(ctx.workflows[wid]))
-    info = {"prompt": live, "n": seg["c"][0], "flag_rate": round(_rate(seg["c"]), 5), "p": p, "flags_ok": flags_ok,
-            "engagement_ok": eng_ok, **eng}
+        base_counts = st["base"] if (base_prompt == st["first_prompt"] and st["base_frozen"]) \
+            else hd.total_counts(st, base_prompt)
+        flags_ok = non_inferior(new[1], new[0], base_counts[1], base_counts[0], margin)
+        p = rate_greater_test(new[1], new[0], base_counts[1], base_counts[0])
+        eng_ok, eng = engagement_ok(new, base_counts, _max_engagement_drop(wf))
+    info = {"prompt": live, "n": new[0], "flag_rate": round(_rate(new), 5), "p": p, "margin": round(margin, 5),
+            "flags_ok": flags_ok, "engagement_ok": eng_ok, **eng}
     if flags_ok and eng_ok:
         ctx.store.add_decision(ctx.now, "incident_verified", f"{live}: flags {info['flag_rate']:.2%}, engagement ok", wid, info)
-        close_incident(ctx.store, inc["id"], ctx.now, f"fixed by {live}; flag rate back to baseline, engagement inside guardrail")
+        close_incident(ctx.store, inc["id"], ctx.now,
+                       f"fixed by {live}; flag rate non-inferior to baseline, engagement inside guardrail")
         return
     body["tried"].append(live)
+    hd.mark_bad(st, live, ctx.now, "verify_failed")
+    hd.save(ctx.store, wid, st)
     ctx.store.add_decision(ctx.now, "incident_verify_failed", f"{live} did not verify; trying next candidate", wid, info)
     prepare_fix(ctx, wid, body, st, live)
     update_incident(ctx.store, inc["id"], body)
@@ -260,6 +391,7 @@ def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
 def _manage(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
     body = inc["body"]
     if live == body["bad_prompt"]:
+        _recheck(ctx, wid, inc, st, live)
         if body["target"] is None and not (body["suggested"] and body["reverts_checked"]):
             prepare_fix(ctx, wid, body, st, live)
             update_incident(ctx.store, inc["id"], body)
@@ -307,6 +439,8 @@ def halluc_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         body = inc["body"]
         target = body.get("target")
         if not target or target == cfg[1]["prompt_version"]:
+            continue
+        if not body.get("holds", True):  # the detector re-ran the spike test this tick and it no longer holds
             continue
         cand = next(c for c in body["candidates"] if c["prompt"] == target)
         s = body["stats"]

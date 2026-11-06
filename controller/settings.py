@@ -90,6 +90,12 @@ DID_EVAL_MIN_DIALS_ACTIVE = 1  # evaluate only when the window has dials
 
 # --- C8 hallucination incidents ---------------------------------------------------------
 HALLUC_VALIDATION_N = 300
+HALLUC_VALIDATION_N_STEPS = (300, 200, 100, 50)  # scaled down when credits are tight; 50 is the floor
+HALLUC_BAD_EXPIRY_MINUTES = 2880  # a prompt we blacklisted is reconsidered after 2 days (evidence ages)
+HALLUC_RECHECK_FAILS = 4  # consecutive ticks on which the spike no longer holds before a false alarm closes
+HALLUC_REOPEN_COOLDOWN_MINUTES = 720  # after a false alarm the same prompt is not re-flagged for 12 h
+HALLUC_FLAG_MARGIN_FRACTION = 1 / 3  # non-inferiority margin = this x the workflow's (1 - min pass rate)
+INCIDENT_CREDIT_DAILY_CAP = 30.0  # per workflow per sim day, all incident-mode + validation spend
 # CONTEXT C8 says p < 0.001; the segment test is re-run every tick (and on a rolling day for drift), so the
 # per-look levels are tightened: 1e-4 for a fresh prompt segment, 1e-5 for same-prompt drift vs history.
 HALLUC_P = 1e-4
@@ -97,7 +103,7 @@ HALLUC_P_DRIFT = 1e-5
 HALLUC_MIN_CONNECTS = 200
 HALLUC_ADHERENCE_DROP = 0.02
 HALLUC_WINDOW_MINUTES = 1440  # rolling window for drift
-HALLUC_VERIFY_MIN_CONNECTS = 200
+HALLUC_VERIFY_MIN_CONNECTS = 400  # non-inferiority needs n: se(0.6%, n=400) ~ 0.4% << margin
 HALLUC_VERIFY_P = 0.01
 HALLUC_BASELINE_MIN_CONNECTS = 200  # a prompt needs this much history to count as a baseline
 ENGAGEMENT_VERIFY_MAX_DROP = 0.02  # absolute; overridden by the workflow's own guardrail if it names engagement

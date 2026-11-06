@@ -70,6 +70,26 @@ def can_spend(credits: float, cost: float, n_workflows: int, *, incident_spent: 
     return incident_spent + cost <= settings.INCIDENT_CREDIT_CAP + 1e-9
 
 
+def spent_since(store: Store, wid: str, since_minute: int) -> float:
+    row = store.conn.execute("SELECT COALESCE(SUM(credits),0) FROM llm_calls WHERE workflow_id=? AND sim_minute>=?",
+                             (wid, since_minute)).fetchone()
+    return float(row[0])
+
+
+def daily_cap_ok(store: Store, wid: str, now: int, cost: float) -> bool:
+    """Per-workflow, per-sim-day ceiling on credit spend so repeated false incidents cannot drain credits."""
+    day_start = now // settings.MINUTES_PER_DAY * settings.MINUTES_PER_DAY
+    return spent_since(store, wid, day_start) + cost <= settings.INCIDENT_CREDIT_DAILY_CAP + 1e-9
+
+
+def pick_validation_n(credits: float, floor_credits: float = 0.0) -> int | None:
+    """Largest standard validation size the credits can cover (leaving ``floor_credits``), else None."""
+    for n in settings.HALLUC_VALIDATION_N_STEPS:
+        if validation_cost(n) <= credits - floor_credits + 1e-9:
+            return n
+    return None
+
+
 def validation_cost(n: int) -> float:
     return float(-(-n // 100))  # ceil(n / 100)
 
@@ -86,6 +106,12 @@ def validation_for(store: Store, wid: str, prompt: str, min_pass: float | None =
         if min_pass is None or rate >= min_pass:
             return {"run_id": run_id, "n": n, "pass_rate": rate, "sim_minute": minute}
     return None
+
+
+def validations_of(store: Store, wid: str, prompt: str) -> list[dict]:
+    rows = store.conn.execute("SELECT run_id, n, pass_rate, sim_minute FROM validation_runs WHERE workflow_id=?"
+                              " AND prompt_version=? ORDER BY sim_minute, run_id", (wid, prompt)).fetchall()
+    return [{"run_id": r, "n": n, "pass_rate": p, "sim_minute": m} for r, n, p, m in rows]
 
 
 def store_validation(store: Store, run: dict, credits: float, minute: int) -> None:
