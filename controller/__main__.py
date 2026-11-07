@@ -80,16 +80,16 @@ def _build_why(store: Store, args: argparse.Namespace) -> tuple[dict, str] | Non
     from . import audit_render as ar
     if args.lead:
         rep = audit.why_lead(store, args.lead, args.day)
-        return rep, ar.render_lead(rep)
+        return rep, ar.render_lead(rep, args.verbose)
     if not args.workflow:
         raise ValueError("--workflow is required unless --lead is given")
     if args.at:
         rep = audit.why_at(store, args.workflow, audit.parse_at(args.at))
-        return rep, ar.render_at(rep)
+        return rep, ar.render_at(rep, args.verbose)
     if args.from_ and args.to:
         rep = audit.why_range(store, args.workflow, audit.parse_bound(args.from_),
                               audit.parse_bound(args.to, end=True))
-        return rep, ar.render_range(rep)
+        return rep, ar.render_range(rep, args.verbose)
     raise ValueError("give --at, or --from and --to, or --lead")
 
 
@@ -226,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
     why.add_argument("--to", help='timeline end (a bare day includes that whole day), e.g. "Day 4"')
     why.add_argument("--lead", help="lead id: that customer's calls and the decisions behind them")
     why.add_argument("--day", type=int, default=None, help="with --lead: only calls on this day")
-    why.add_argument("--json", action="store_true")
+    why.add_argument("--json", action="store_true", help="the complete report as JSON")
+    why.add_argument("--verbose", action="store_true",
+                     help="also print raw decision inputs, dry runs and every experiment look row")
     pa = sub.add_parser("person-analysis", help="per-person call-time analysis of a store (analysis only, never config)")
     pa.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
     pa.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")

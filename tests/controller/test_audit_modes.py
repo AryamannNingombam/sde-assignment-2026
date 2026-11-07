@@ -30,12 +30,12 @@ def test_at_mode_reports_version_proposal_approval_and_next(ran):
     assert rep["version"]["actor"] == "controller_approved" and p["approval"]["approval_id"] == p["approval_id"]
     assert p["approval"]["decided_at"] and p["approval"]["approver"].startswith("policy approver")
     assert rep["decisions"] and any(e["event"] == "APPLIED" for e in p["events"])
-    assert rep["superseded_by"] is None
+    assert rep["next_change"] is None
     text = audit_render.render_at(rep)
     for needle in ("active version", "approval apr_", "proposal lifecycle", "post-apply monitoring"):
         assert needle in text
     earlier = audit.why_at(ran, "nw_renewal", 0)
-    assert earlier["version"]["version"] == 1 and earlier["superseded_by"]["version"]["version"] == 2
+    assert earlier["version"]["version"] == 1 and earlier["next_change"]["version"]["version"] == 2
 
 
 def test_range_mode_lists_config_and_proposal_events(ran):

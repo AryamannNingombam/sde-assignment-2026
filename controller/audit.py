@@ -160,7 +160,7 @@ def workflow_policy(store: Store, wid: str) -> dict | None:
     d = json.loads(raw)
     gov = d.get("governance") or {}
     return {"approver_hours": gov.get("approver_hours"), "approver_latency_minutes": gov.get("approver_latency_minutes"),
-            "proposal_ttl_hours": gov.get("proposal_ttl_hours"), "max_requests_per_24h": gov.get("max_requests_per_24h"),
+            "auto_apply": gov.get("auto_apply"), "proposal_ttl_hours": gov.get("proposal_ttl_hours"), "max_requests_per_24h": gov.get("max_requests_per_24h"),
             "objective": d.get("objective")}
 
 
@@ -227,7 +227,7 @@ def version_basis(store: Store, wid: str, version: int | None) -> dict | None:
 def why_at(store: Store, workflow: str, at_minute: int) -> dict[str, Any]:
     out: dict[str, Any] = {"mode": "at", "workflow": workflow, "at": fmt_minute(at_minute), "at_minute": at_minute,
                            "version": None, "config": None, "proposal": None, "evidence": [],
-                           "decisions": [], "monitoring": [], "superseded_by": None}
+                           "decisions": [], "monitoring": [], "next_change": None}
     ver = _version_at(store, workflow, at_minute)
     if ver is None:
         return out
@@ -235,13 +235,25 @@ def why_at(store: Store, workflow: str, at_minute: int) -> dict[str, Any]:
     prop = basis.get("proposal")
     nxt = _next_version(store, workflow, ver["version"])
     out.update(version=ver, config=basis.get("config"), proposal=prop, decisions=basis.get("decisions", []),
-               superseded_by=_describe_next(store, nxt))
+               next_change=_describe_next(store, _next_same_dims(store, workflow, ver) or nxt))
     if prop:
         since = (prop["created_minute"] or 0) - settings.MINUTES_PER_DAY
         out["evidence"] = _evidence(store, workflow, prop["created_minute"] or at_minute, since)
         out["monitoring"] = _after(store, workflow, prop["applied_minute"],
                                    nxt["ts_minute"] if nxt else None)
+    from . import audit_story  # late: audit_story builds on this module's helpers
+    audit_story.attach(store, out)
     return out
+
+
+def _next_same_dims(store: Store, wid: str, ver: dict) -> dict | None:
+    """The next version that touched any of the same dims (None for the initial version or when none did)."""
+    mine = set(_json(ver["changed_dims"]) or [])
+    if not mine:
+        return None
+    rows = _rows(store, f"SELECT {_VER_COLS} FROM config_versions WHERE workflow_id=? AND version>?"
+                 " AND ts_minute IS NOT NULL ORDER BY version", (wid, ver["version"]))
+    return next((r for r in rows if mine & set(_json(r["changed_dims"]) or [])), None)
 
 
 def _describe_next(store: Store, nxt: dict | None) -> dict | None:
