@@ -42,7 +42,7 @@ def test_worst_case_decision_must_precede_expiry():
     assert fatigue.filing_window_ok(at(0, 11), KESTREL, False, "other")[0]
     # a shortened TTL (expires_in_hours) tightens the rule
     assert fatigue.filing_window_ok(at(0, 10), RENEWAL, False, "x", expires_in_hours=24)[0]
-    assert not fatigue.filing_window_ok(at(0, 10), RENEWAL, True, "x", expires_in_hours=3)[0]
+    assert not fatigue.filing_window_ok(at(0, 10), RENEWAL, True, "x", expires_in_hours=2)[0]  # best P < routine floor
     assert fatigue.ttl_minutes(RENEWAL, 100) == 24 * 60  # capped at the policy TTL
 
 

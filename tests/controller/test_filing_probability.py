@@ -31,7 +31,9 @@ def test_short_ttl_still_files_with_partial_probability():
     gov = {**NW_RENEWAL, "proposal_ttl_hours": 3}
     p = fatigue.decision_probability(at(0, 10), gov)
     assert 0.5 < p < 0.9  # latency 30..240 vs a 180 min ttl
-    assert not fatigue.filing_window_ok(at(0, 10), gov, True, "x")[0]  # routine needs 0.9
+    best = fatigue.best_daily_probability(gov)
+    p_ok = fatigue.filing_window_ok(at(0, 10), gov, True, "x")[0]  # routine: 0.9, or the day's best minutes
+    assert p_ok == (p >= 0.95 * best)
     assert fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]  # urgent needs 0.5
     assert fatigue.filing_window_ok(at(0, 10), {**gov, "proposal_ttl_hours": 4}, True, "x")[0]
 
@@ -122,7 +124,8 @@ def test_incident_still_files_when_no_minute_of_the_day_reaches_the_urgent_bar(b
     urgent = [m for m in minutes if fatigue.filing_window_ok(m, gov, False, "x")[0]]
     assert urgent, "an incident must be fileable at some minute"
     assert all(fatigue.decision_probability(m, gov) >= 0.95 * best for m in urgent)
-    assert not any(fatigue.filing_window_ok(m, gov, True, "x")[0] for m in minutes)
+    routine = [m for m in minutes if fatigue.filing_window_ok(m, gov, True, "x")[0]]
+    assert (not routine) == (best < settings.FILE_MIN_P_ROUTINE_FLOOR)  # nw_renewal 0.43 and nw_kyc 0.145: never
 
 
 def test_hopeless_ttl_never_files_even_an_incident():

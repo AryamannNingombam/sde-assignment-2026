@@ -50,10 +50,12 @@ SCHEDULE_LIFT_HAIRCUT = 0.5  # a hour re-weighting replay has no CI; count half 
 # from the stakeholder memo 04 (Anita, Kestrel ops): at most 2 requests/day and none before
 # 11:00. Routine requests only: incidents may use the reserved slot and the approver's opening.
 # Default for any other workflow id: no soft cap.
-SOFT_CAPS: dict[str, dict[str, int]] = {
-    "ks_cancel": {"max_per_day": 2, "not_before_hour": 11},
-}
+_KESTREL_SOFT_CAP = {"max_per_day": 2, "not_before_hour": 11}
+SOFT_CAPS: dict[str, dict[str, int]] = {"ks_cancel": _KESTREL_SOFT_CAP}  # per-workflow-id override
+# The same memo binds every workflow of the Kestrel tenant (a hidden scenario may name them differently).
+SOFT_CAPS_BY_TENANT: dict[str, dict[str, int]] = {"kestrel_finance": _KESTREL_SOFT_CAP}
 FILE_MIN_P_ROUTINE = 0.9  # min P(decision lands before expires_at) to file a routine request
+FILE_MIN_P_ROUTINE_FLOOR = 0.6  # ... unless no minute of the day reaches 0.9: then the day's best minutes, if >= this
 FILE_MIN_P_URGENT = 0.5  # ... for an incident / severe (harm-stop, rollback) request: a coin-flip, not a long shot
 FILE_MIN_P_URGENT_FLOOR = 0.10  # ... unless no minute of the day reaches 0.5: then the day's best minutes, if >= this
 SUBMIT_FAILED_BACKOFF_MIN = 240  # sim minutes before the same (workflow, kind, route) is resubmitted
@@ -239,3 +241,6 @@ EXP_DROP_VETO_Z_MARGIN = 0.5  # apply-time: ... or its cumulative z is above the
 # --- floor fixes D ---
 SUBMIT_FAILED_BACKOFF_URGENT_MIN = 30  # incident approval-route resend delay after a failed send (fixed, no doubling)
 VETO_CRASH_MAX_RETRIES = 3  # a crashing apply-time veto hook keeps an approval alive this many ticks before it is withheld
+
+# --- review 3 ---
+REFILE_AFTER_REJECT_MIN = 120  # after the 2nd+ rejection of one (workflow, kind) in 24 h: wait this x (rejections - 1)

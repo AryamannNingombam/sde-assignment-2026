@@ -140,6 +140,13 @@ class ProposalRepo:
         window = backoff_min if fixed else min(backoff_min * 2 ** (len(rows) - 1), settings.MINUTES_PER_DAY)
         return now - rows[-1] < window
 
+    def rejection_minutes(self, workflow_id: str, kind: str, since: int) -> list[int]:
+        """Sim minutes (ascending) at which proposals of (workflow, kind) were recorded REJECTED after ``since``."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT e.ts_minute FROM proposal_events e JOIN proposals p ON p.proposal_id=e.proposal_id"
+            " WHERE p.workflow_id=? AND p.kind=? AND p.route='approval' AND e.event=? AND e.ts_minute>?"
+            " ORDER BY e.ts_minute, e.id", (workflow_id, kind, REJECTED, since))]
+
     def last_auto_minute(self, workflow_id: str) -> int | None:
         r = self.conn.execute("SELECT MAX(applied_minute) FROM proposals WHERE workflow_id=? AND"
                               " route='auto' AND applied_minute IS NOT NULL", (workflow_id,)).fetchone()

@@ -21,7 +21,7 @@ from typing import Any, Mapping
 from . import client as c
 from . import settings
 from .desired import Priority, VetoCrash
-from .fatigue import filing_window_ok, slot_available, soft_cap_ignored
+from .fatigue import apply_window_unreachable, filing_window_ok, slot_available, soft_cap_ignored
 from .faults import crash_point
 from .ingest import ts_to_minute
 from .proposal_repo import (
@@ -46,6 +46,7 @@ class Governance:
         self._live_cache: dict[str, tuple[int, dict]] = {}
         self._noted: dict[str, int] = {}
         self._skip_apply: set[str] = set()  # workflows whose /apply outcome is unknown this tick
+        self.tick_minutes = settings.TICK_MINUTES  # the sim's tick (set by the loop): when decisions are first seen
         self.veto_check = None  # optional (row, now) -> reason: withhold /apply because the evidence went stale
 
     # ------------------------------------------------------------ helpers
@@ -87,18 +88,40 @@ class Governance:
     def requests_used(self, wid: str, now: int) -> int:
         return self.repo.count_recent_requests(wid, now)
 
+    def tenant_of(self, wid: str) -> str | None:
+        return self.workflows[wid].get("tenant_id")
+
     def can_file(self, wid: str, now: int, priority: int, expires_in_hours: float | None = None
                  ) -> tuple[bool, str]:
         """P4 + P5 for an approval request: budget (reserved last slot) and timing."""
         gov = self.workflows[wid]["governance"]
+        tenant, tick = self.tenant_of(wid), self.tick_minutes
         routine = priority == Priority.ROUTINE
-        ok, why = slot_available(self.requests_used(wid, now), gov, priority, wid)
+        ok, why = slot_available(self.requests_used(wid, now), gov, priority, wid, tenant)
         if not ok:
             return False, why
-        ignored = soft_cap_ignored(gov, wid, expires_in_hours)
+        if apply_window_unreachable(gov, tick) and self.note_once(f"apply_window:{wid}", now):
+            self.alert(now, "error", "apply_window_unreachable",
+                       f"apply window {gov.get('apply_window_hours')} h is too short for a {tick}-min tick: "
+                       "an approval would lapse before it can be applied; not filing", wid)
+        ignored = soft_cap_ignored(gov, wid, expires_in_hours, tenant, tick)
         if ignored and routine and self.note_once(f"softcap:{wid}", now):
             self.store.add_decision(now, "soft_cap_ignored", f"soft cap not honoured: {ignored}", wid)
-        return filing_window_ok(now, gov, routine, wid, expires_in_hours)
+        return filing_window_ok(now, gov, routine, wid, expires_in_hours, tenant_id=tenant, tick=tick)
+
+    def refile_cooldown(self, wid: str, kind: str, now: int) -> str | None:
+        """Why this (workflow, kind) must not be refiled yet after repeated rejections, else None.
+
+        The first rejection never delays the refile (the producer re-plans with fresh data); from the
+        second rejection within 24 h the wait grows by REFILE_AFTER_REJECT_MIN per extra rejection
+        (capped at a day), so a producer that keeps re-emitting cannot burn the daily budget."""
+        times = self.repo.rejection_minutes(wid, kind, now - settings.MINUTES_PER_DAY)
+        if len(times) < 2:
+            return None
+        wait = min(settings.REFILE_AFTER_REJECT_MIN * (len(times) - 1), settings.MINUTES_PER_DAY)
+        if now < times[-1] + wait:
+            return f"{kind} was rejected {len(times)}x in 24h: no refile until minute {times[-1] + wait}"
+        return None
 
     def seed_plan_seqs(self) -> None:
         """Startup: raise each workflow's plan_seq floor above every ``{wid}:{seq}:{kind}`` id the sim
@@ -152,6 +175,8 @@ class Governance:
             return None
         if route == ROUTE_APPROVAL:
             ok, why = self.can_file(wid, now, priority, draft.expires_in_hours)
+            if ok and (cooldown := self.refile_cooldown(wid, draft.kind, now)):
+                ok, why = False, cooldown
             if not ok:
                 self.store.add_decision(now, "proposal_deferred", why, wid, {"kind": draft.kind})
                 return None
@@ -342,7 +367,8 @@ class Governance:
         if row.route == ROUTE_APPROVAL:
             ok, why = filing_window_ok(now, self.workflows[wid]["governance"],
                                        row.priority == Priority.ROUTINE, wid,
-                                       row.body["request"].get("expires_in_hours"))
+                                       row.body["request"].get("expires_in_hours"),
+                                       tenant_id=self.tenant_of(wid), tick=self.tick_minutes)
             if not ok:
                 self.repo.transition(row, STALE, now, f"not resent: {why}")
                 return
@@ -352,13 +378,21 @@ class Governance:
         try:
             ap = self.client.get_approval(row.approval_id)
         except c.NotFound:
-            self.alert(now, "error", "approval_missing", f"{row.proposal_id}: {row.approval_id}",
-                       row.workflow_id)
+            self._approval_vanished(row, now)
             return
         if ap["status"] != "pending":
             self._decide(row, ap, now)
         elif self.live(row.workflow_id)[0] != row.base_version:
             self.repo.transition(row, STALE, now, "base changed while pending; never applied")
+
+    def _approval_vanished(self, row: ProposalRow, now: int) -> None:
+        """The sim has no such approval: alert once a day; once it is past its expiry (plus a tick of
+        grace) it can never be decided, so release the in-flight slot as EXPIRED (a re-plan)."""
+        if self.note_once(f"approval_missing:{row.proposal_id}", now):
+            self.alert(now, "error", "approval_missing", f"{row.proposal_id}: {row.approval_id}",
+                       row.workflow_id)
+        if row.expires_minute is not None and now > row.expires_minute + self.tick_minutes:
+            self.repo.transition(row, EXPIRED, now, "approval not found at the sim and past expiry: re-plan")
 
     def _reconcile_apply_outcome(self, row: ProposalRow, now: int) -> None:
         try:

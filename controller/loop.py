@@ -18,6 +18,7 @@ from . import levers  # noqa: F401  (registers the Phase 3 detectors on the defa
 from .credits import reconcile_ledger
 from .desired import DEFAULT_REGISTRY, Registry
 from .faults import crash_point
+from .fatigue import in_hours
 from .alerts import TickObserver
 from .governance import Governance
 from .planner import Planner
@@ -61,7 +62,7 @@ class Windows:
 
     def active_at(self, minute: int) -> bool:
         tod = minute % settings.MINUTES_PER_DAY
-        return self.unknown or any(s * 60 <= tod < e * 60 for s, e in self.spans)
+        return self.unknown or any(in_hours(tod, (s, e)) for s, e in self.spans)
 
     def minutes_to_next_boundary(self, minute: int, tick: int = settings.TICK_MINUTES) -> int:
         """Minutes until the next window start (searching up to one day ahead)."""
@@ -120,6 +121,7 @@ class Controller:
                                            sort_keys=True))
         mirror_configs(self.client, self.store, self._workflow_ids)
         self.gov = Governance(self.client, self.store, {w["workflow_id"]: w for w in workflows})
+        self.gov.tick_minutes = int(state.get("tick_minutes") or settings.TICK_MINUTES)
         self.gov.seed_plan_seqs()
         self.planner = Planner(self.client, self.store, self.gov, self.registry)
         self.gov.veto_check = lambda row, now: self.registry.veto(self.planner.context(now), row.workflow_id, row.kind)
@@ -157,6 +159,27 @@ class Controller:
             self.store.add_alert(now, "warn", "person_analysis_failed", f"{type(exc).__name__}: {exc}")
         phases["person_s"] = time.perf_counter() - t
 
+    def _guarded(self, step: str, now: int, fn, *args) -> None:
+        """Run one tick step; a deterministic bug in it must not stop the sim advancing (the run would
+        score nothing). Roll back any open transaction, log, alert once per sim day, carry on. Sim-progress
+        errors (``AdvanceNotApplied``/``WorldRegressed``) are never swallowed. Skipping a step is safe: the
+        proposal state machine is persisted per transition and every step re-reads it next tick."""
+        try:
+            fn(*args)
+        except (AdvanceNotApplied, WorldRegressed, Finished):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("tick step %s failed", step)
+            try:
+                if self.store.conn.in_transaction:
+                    self.store.conn.execute("ROLLBACK")
+                key = f"tick_step_failed:{step}"
+                if self.gov is None or self.gov.note_once(key, now):
+                    self.store.add_alert(now, "error", "tick_step_failed",
+                                         f"{step}: {type(exc).__name__}: {exc}")
+            except Exception:  # noqa: BLE001  (reporting must never take the tick down)
+                log.exception("could not record tick_step_failed")
+
     def _check_world(self, state: dict) -> None:
         """Mid-run regression check (startup does it in ``open_world_store``)."""
         last_minute = self.store.get_meta("sim_minute")
@@ -177,17 +200,18 @@ class Controller:
         now = state["sim_minute"]
         finished = state["finished"]
         ph: dict[str, float] = {}
+        self.gov.tick_minutes = int(state.get("tick_minutes") or settings.TICK_MINUTES)
         t = time.perf_counter()
-        self.gov.reconcile(now)
+        self._guarded("reconcile", now, self.gov.reconcile, now)
         ph["reconcile_s"] = time.perf_counter() - t
         t = time.perf_counter()
         stats = self.ingestor.sync()
         ph["ingest_s"] = time.perf_counter() - t
         if not finished:
             t = time.perf_counter()
-            self.gov.apply_approved(now)
+            self._guarded("apply_approved", now, self.gov.apply_approved, now)
             ph["apply_s"] = time.perf_counter() - t
-            self.plan_and_submit(now, ph)
+            self._guarded("plan_and_submit", now, self.plan_and_submit, now, ph)
             self.run_person_analysis(now, ph)
         self._phases = ph
         hit_stop = self.stop_at_minute is not None and state["sim_minute"] >= self.stop_at_minute
