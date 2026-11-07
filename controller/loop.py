@@ -197,7 +197,9 @@ class Controller:
                                self.in_flight(), state.get("tick_minutes", settings.TICK_MINUTES))
         self._record_metrics(state["sim_minute"], stats, t0, step)
         metrics.record_phases(self.store, now, self._phases)
+        t = time.perf_counter()
         self.observer.after_tick(state, now)  # metrics_ext + alert rules (never raises)
+        self._record_observer_phase(time.perf_counter() - t)
         if finished:
             self.store.add_decision(state["sim_minute"], "finished", "scenario finished; exiting 0")
             return True, stats
@@ -212,6 +214,14 @@ class Controller:
             self._saw_finished = True
             return True, stats + self.ingestor.sync()  # drain what the final advance produced
         return False, stats
+
+    def _record_observer_phase(self, seconds: float) -> None:
+        """Add the observer's cost to this tick's tick_phases row (written just before it ran)."""
+        try:
+            self.store.conn.execute(
+                "UPDATE tick_phases SET observer_s=? WHERE id=(SELECT MAX(id) FROM tick_phases)", (seconds,))
+        except Exception:  # noqa: BLE001  (load analysis only, never breaks the loop)
+            log.debug("observer phase not recorded", exc_info=True)
 
     def _record_metrics(self, minute: int, stats: IngestStats, t0: float, step: int) -> None:
         now = time.perf_counter()

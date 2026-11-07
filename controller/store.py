@@ -12,6 +12,8 @@ from . import settings
 
 log = logging.getLogger(__name__)
 SCHEMA_VERSION = "1"
+CALLS_INDEX = "calls_lead"
+CALLS_INDEX_META = "calls_index_built"
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _PROPOSAL_COLUMNS = (("route", "TEXT"), ("priority", "INTEGER"), ("plan_seq", "INTEGER"),
                      ("filed_minute", "INTEGER"), ("apply_by_minute", "INTEGER"),
@@ -47,6 +49,7 @@ class Store:
         self.conn.execute(f"PRAGMA cache_size=-{settings.SQLITE_CACHE_KB}")
         self.conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate()
+        self._settle_calls_index_flag()
         if self.get_meta("schema_version") is None:
             self.set_meta("schema_version", SCHEMA_VERSION)
 
@@ -71,6 +74,38 @@ class Store:
         # a replayed approval_decided event can never insert twice (NULL ids stay distinct)
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS proposal_events_event_id"
                           " ON proposal_events (event_id)")
+
+        phases = {r[1] for r in self.conn.execute("PRAGMA table_info(tick_phases)")}
+        if "observer_s" not in phases:
+            self.conn.execute("ALTER TABLE tick_phases ADD COLUMN observer_s REAL")
+
+    # ---------------------------------------------------------------- calls_lead index
+    def has_calls_index(self) -> bool:
+        return self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                                 (CALLS_INDEX,)).fetchone() is not None
+
+    def _settle_calls_index_flag(self) -> None:
+        """A database that already has the index (built before this flag existed) is complete.
+
+        A fresh or mid-history database has no index and no flag: the flag is only ever set, in
+        the same transaction as CREATE INDEX, by ``build_calls_index``."""
+        if self.get_meta(CALLS_INDEX_META) is None and self.has_calls_index():
+            self.set_meta(CALLS_INDEX_META, "1")
+
+    def calls_index_ready(self) -> bool:
+        return self.get_meta(CALLS_INDEX_META) == "1"
+
+    def build_calls_index(self) -> None:
+        """Create calls_lead and flag history complete atomically (DDL is transactional in SQLite)."""
+        with self.transaction():
+            self.conn.execute(f"CREATE INDEX IF NOT EXISTS {CALLS_INDEX} ON calls (lid)")
+            self.set_meta(CALLS_INDEX_META, "1")
+
+    def set_wal_autocheckpoint(self, pages: int) -> None:
+        self.conn.execute(f"PRAGMA wal_autocheckpoint={int(pages)}")
+
+    def checkpoint(self) -> None:
+        self.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def transaction(self) -> "_Txn":
         return _Txn(self.conn)

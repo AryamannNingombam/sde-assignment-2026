@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS calls (
     halluc_flag INTEGER,
     adherence REAL
 );
-CREATE INDEX IF NOT EXISTS calls_lead ON calls (lid);
+-- calls_lead (lid) is NOT created here: Store.build_calls_index() makes it once history is ingested.
 CREATE INDEX IF NOT EXISTS calls_wf_day ON calls (workflow_id, day);
 
 CREATE TABLE IF NOT EXISTS cube (
@@ -200,6 +200,11 @@ CREATE TABLE IF NOT EXISTS alerts (
     severity TEXT NOT NULL,
     code TEXT NOT NULL,
     message TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tick_phases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, sim_minute INTEGER NOT NULL, reconcile_s REAL, ingest_s REAL,
+    apply_s REAL, detect_s REAL, plan_s REAL, observer_s REAL
 );
 
 CREATE TABLE IF NOT EXISTS metrics (

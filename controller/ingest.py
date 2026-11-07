@@ -2,7 +2,16 @@
 
 History chunks first, then events chunks, in global chunk order. The ``event_id >
 last_event_id`` guard makes replaying a chunk a no-op. Inside the chunk transaction the
-lines are parsed and flushed in sub-batches to cap memory.
+lines are parsed and flushed in sub-batches: that caps the memory of the parsed event dicts
+only; the raw text of one chunk is still held whole (a 54 MB chunk on public_03).
+
+History fast path: while history chunks are ingested the ``calls_lead`` index does not exist
+(random-page writes dominated COMMIT) and ``wal_autocheckpoint`` is raised. Once the last
+history chunk is committed, ``Store.build_calls_index`` creates the index and sets the
+``calls_index_built`` meta flag in one transaction; events (live) chunks are never ingested
+before that. A crash mid-history leaves cursor and rows consistent (one transaction per chunk,
+synchronous stays NORMAL, so the cursor is exactly as durable as the rows); the restart sees
+no flag, resumes history from the cursor and builds the index when it is done.
 
 Limitation: ``GET /config/history`` returns no config bodies, so a config version whose
 ``config_changed`` event we never saw (e.g. superseded inside one advance) cannot be
@@ -16,6 +25,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime
 from functools import lru_cache
@@ -30,6 +40,9 @@ from .store import Store
 log = logging.getLogger(__name__)
 _EPOCH_ORD = date.fromisoformat(settings.EPOCH_DATE).toordinal()
 _MAX_MISMATCH_ALERTS = 5
+# Pages of WAL allowed before an automatic checkpoint during history ingest (about 1 GB at 4 KiB pages).
+# Module constant here because settings.py is owned elsewhere; the PM may move it.
+HISTORY_WAL_AUTOCHECKPOINT_PAGES = 250_000
 _CONFIG_CHANGED_LINE = re.compile(r'^.*"config_changed".*$', re.MULTILINE)
 
 _CALL_SQL = ("INSERT OR IGNORE INTO calls(event_id, workflow_id, ts_minute, day, hour, lid,"
@@ -94,24 +107,35 @@ class Ingestor:
         self.store = store
         self.vocab = FeatureVocab.load(store.get_meta(VOCAB_META_KEY))
         self._checker = CohortChecker(self.vocab)
-        self._leads: dict[str, tuple[int, int]] = {}
+        self._leads: OrderedDict[str, tuple[int, int]] = OrderedDict()
         self._cohorts: dict[tuple[str, int], list] = {}
-        self._history_done = False
         self._next_lid = 0
         self._skipped: dict[tuple[str, int], int] = {}
 
     # ------------------------------------------------------------ driver
     def sync(self) -> IngestStats:
-        """Ingest every chunk after the cursor."""
+        """Ingest every chunk after the cursor (history fast path first, then live events)."""
         total = IngestStats()
+        if not self.store.calls_index_ready():
+            total += self._sync_history()
         cursor = self.store.get_cursor()
-        pending: list[dict] = []
-        if not self._history_done:
-            pending += self.client.list_chunks("history", cursor.last_chunk)
-        pending += self.client.list_chunks("events", cursor.last_chunk)
-        self._history_done = True
-        for meta in sorted(pending, key=lambda m: m["chunk"]):
+        for meta in sorted(self.client.list_chunks("events", cursor.last_chunk),
+                           key=lambda m: m["chunk"]):
             total += self.process_chunk(meta)
+        return total
+
+    def _sync_history(self) -> IngestStats:
+        """History chunks without the calls_lead index and with a large WAL; then build the index."""
+        total = IngestStats()
+        pending = self.client.list_chunks("history", self.store.get_cursor().last_chunk)
+        self.store.set_wal_autocheckpoint(HISTORY_WAL_AUTOCHECKPOINT_PAGES)
+        try:
+            for meta in sorted(pending, key=lambda m: m["chunk"]):
+                total += self.process_chunk(meta)
+        finally:
+            self.store.set_wal_autocheckpoint(settings.WAL_AUTOCHECKPOINT_PAGES)
+        self.store.build_calls_index()
+        self.store.checkpoint()
         return total
 
     def process_chunk(self, meta: dict) -> IngestStats:
@@ -194,8 +218,9 @@ class Ingestor:
                             ev["campaign_id"], ts_to_minute(ev["ts"])))
 
     def _remember_lead(self, lead_id: str, lid: int, cell: int) -> None:
-        if len(self._leads) >= settings.LEAD_CACHE_MAX:
-            self._leads.clear()
+        if len(self._leads) >= settings.LEAD_CACHE_MAX:  # evict the older half, keep the recent leads
+            for _ in range(len(self._leads) // 2):
+                self._leads.popitem(last=False)
         self._leads[lead_id] = (lid, cell)
 
     def _lookup_lead(self, lead_id: str) -> tuple[int, int] | None:

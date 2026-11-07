@@ -25,6 +25,18 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 DAY = 1440
+MARKER = ".load_test_workdir"  # written into every work dir this script creates
+
+
+def prepare_work_dir(work: Path, force: bool) -> None:
+    """Empty ``work`` for a fresh run; never delete a non-empty directory this script did not create."""
+    if work.exists() and any(work.iterdir()):
+        if not (work / MARKER).exists() and not force:
+            raise SystemExit(f"refusing to delete non-empty {work}: not created by load_test.py "
+                             f"(no {MARKER} marker); pass --force to wipe it or choose another --work-dir")
+        shutil.rmtree(work)
+    work.mkdir(parents=True, exist_ok=True)
+    (work / MARKER).write_text("created by scripts/load_test.py\n")
 
 
 def rss_mb(pid: int) -> float:
@@ -85,10 +97,15 @@ def summarise(db: Path, samples: list[tuple], t_ctl_start: float, hist_events: i
     m = con.execute("SELECT sim_minute, events_ingested, ingest_wall_s, lag_s, tick_wall_s, step_minutes FROM metrics"
                     " ORDER BY id").fetchall()
     try:
-        ph = con.execute("SELECT sim_minute, reconcile_s, ingest_s, apply_s, detect_s, plan_s FROM tick_phases"
-                         " ORDER BY id").fetchall()
+        ph = con.execute("SELECT sim_minute, reconcile_s, ingest_s, apply_s, detect_s, plan_s, observer_s"
+                         " FROM tick_phases ORDER BY id").fetchall()
     except sqlite3.Error:
-        ph = []
+        try:  # databases from before the observer phase existed
+            ph = [r + (None,) for r in con.execute(
+                "SELECT sim_minute, reconcile_s, ingest_s, apply_s, detect_s, plan_s FROM tick_phases"
+                " ORDER BY id").fetchall()]
+        except sqlite3.Error:
+            ph = []
     out: dict = {}
     live = [r for r in m if r[1] and r[0] > 0]
     out["ticks"] = len(m)
@@ -99,7 +116,7 @@ def summarise(db: Path, samples: list[tuple], t_ctl_start: float, hist_events: i
     ev, ws = sum(r[1] for r in m), sum(r[2] for r in m)
     out["events_ingested_in_ticks"] = ev
     out["ingest_events_per_s"] = round(ev / ws, 0) if ws else None
-    for i, name in enumerate(("reconcile_s", "ingest_s", "apply_s", "detect_s", "plan_s"), 1):
+    for i, name in enumerate(("reconcile_s", "ingest_s", "apply_s", "detect_s", "plan_s", "observer_s"), 1):
         out[f"phase_{name}"] = dist([r[i] for r in ph if r[i] is not None])
     out["ticks_with_events"] = len(live)
     first = m[0][0] if m else 0
@@ -140,12 +157,11 @@ def main() -> int:
     ap.add_argument("--max-sim-days", type=float, default=None, help="stop the controller after N sim days")
     ap.add_argument("--work-dir", default=None)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--force", action="store_true", help="wipe a non-empty --work-dir not created by this script")
     args = ap.parse_args()
     name = Path(args.scenario).stem
     work = Path(args.work_dir) if args.work_dir else ROOT / "runs" / f"load_{name}"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
+    prepare_work_dir(work, args.force)
     state_dir = work / "state"
     port = free_port()
     url = f"http://127.0.0.1:{port}"
