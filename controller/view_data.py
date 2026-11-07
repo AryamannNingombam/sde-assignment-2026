@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ Z95 = 1.96
 class ReadOnlyStore(Store):
     """A :class:`Store` over a ``mode=ro`` connection: no schema creation, no writes."""
 
+    readonly = True  # derived-cache writers (exp_data) check this and skip their write
+
     def __init__(self, path: str | Path) -> None:  # noqa: super().__init__ would open read-write
         self.path = Path(path)
         if not self.path.exists():
@@ -37,11 +40,27 @@ def open_readonly(path: str | Path) -> ReadOnlyStore:
     return ReadOnlyStore(path)
 
 
+_MISSING_SCHEMA = re.compile(r"no such (table|column)", re.IGNORECASE)
+NEWEST_CALL_WINDOW = 1000  # event_ids are assigned in ingestion order, so the newest minute is in the last few rows
+
+
+def newest_call_minute(store: Store) -> int | None:
+    """Newest stored call minute without scanning ``calls`` (no ts_minute index; ~7M rows on a long run).
+
+    Ingestion order is time order, so the max over the last ``NEWEST_CALL_WINDOW`` primary-key rows is the global max.
+    """
+    r = rows(store, "SELECT MAX(ts_minute) AS m FROM calls WHERE event_id > (SELECT MAX(event_id) FROM calls) - ?",
+             (NEWEST_CALL_WINDOW,))
+    return r[0]["m"] if r and r[0]["m"] is not None else None
+
+
 def rows(store: Store, sql: str, args: tuple = ()) -> list[dict]:
     try:
         cur = store.conn.execute(sql, args)
-    except sqlite3.OperationalError:  # table not there yet (older/foreign DB): show nothing, do not crash
-        return []
+    except sqlite3.OperationalError as exc:
+        if _MISSING_SCHEMA.search(str(exc)):  # table/column not there yet (older DB): show nothing, do not crash
+            return []
+        raise  # "database is locked" and friends must not look like "nothing waiting on you"
     names = [d[0] for d in cur.description]
     return [dict(zip(names, r)) for r in cur.fetchall()]
 
@@ -62,9 +81,8 @@ def now_minute(store: Store) -> int:
     becoming an empty midnight day.
     """
     tick = rows(store, "SELECT MAX(sim_minute) AS m FROM metrics")
-    call = rows(store, "SELECT MAX(ts_minute) AS m FROM calls")
     t = tick[0]["m"] if tick and tick[0]["m"] is not None else None
-    c = call[0]["m"] if call and call[0]["m"] is not None else None
+    c = newest_call_minute(store)
     if t is None:
         return int(c or 0)
     return int(t if c is None else min(t, c + 1))

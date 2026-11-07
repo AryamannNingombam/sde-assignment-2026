@@ -6,7 +6,9 @@ A separate process, never started by run.sh. Server-rendered HTML (no JS), one r
 """
 from __future__ import annotations
 
+import logging
 import socket
+import sqlite3
 import sys
 from contextlib import contextmanager
 from html import escape as e
@@ -14,13 +16,15 @@ from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from . import audit, audit_render, metrics
 from . import view as text_view
 from . import view_data as vd
 from .audit import fmt_minute
+
+log = logging.getLogger(__name__)
 
 CSS = """:root{--bg:#fafaf7;--fg:#1d2327;--mut:#5f6b73;--card:#fff;--line:#dcdfe3;--ok:#1b7f3b;--warn:#a86400;--bad:#b3261e}
 @media(prefers-color-scheme:dark){:root{--bg:#15191c;--fg:#e6e8ea;--mut:#9aa5ad;--card:#1d2226;--line:#333b41;--ok:#4cc38a;--warn:#e0a030;--bad:#ff7b72}}
@@ -161,6 +165,12 @@ def create_app(db: str | Path) -> FastAPI:
     db = Path(db)
     app = FastAPI(title="Controller supervisor view", docs_url=None, redoc_url=None, openapi_url=None)
 
+    @app.exception_handler(sqlite3.Error)
+    def unavailable(request: Request, exc: sqlite3.Error) -> HTMLResponse:
+        log.warning("database unavailable for %s: %s", request.url.path, exc)
+        return HTMLResponse(_page("Data unavailable", _card("<p>Data unavailable (the database is busy or unreadable). "
+                                                           "Please retry in a few seconds.</p>")).body.decode(), status_code=503)
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         with _store(db) as s:
@@ -174,7 +184,10 @@ def create_app(db: str | Path) -> FastAPI:
         with _store(db) as s:
             if wid not in vd.workflow_ids(s):
                 raise HTTPException(404, f"unknown workflow {wid}")
-            now = audit.parse_at(at) if at else None
+            try:
+                now = audit.parse_at(at) if at else None
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
             return _page(wid, workflow_html(vd.build(s, wid, now)))
 
     @app.get("/weekly", response_class=HTMLResponse)

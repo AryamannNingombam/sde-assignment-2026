@@ -13,7 +13,7 @@ from typing import Mapping
 from . import settings
 from .audit import fmt_minute
 from .store import Store
-from .view_data import IN_FLIGHT, rows
+from .view_data import IN_FLIGHT, newest_call_minute, rows
 
 DAY = settings.MINUTES_PER_DAY
 _DDL = """CREATE TABLE IF NOT EXISTS metrics_ext (
@@ -68,7 +68,7 @@ def deadlines(store: Store) -> tuple[int, int | None]:
 def record(store: Store, minute: int, credits: float | None, totals: Mapping[str, int]) -> None:
     ensure(store)
     n, near = deadlines(store)
-    newest = store.conn.execute("SELECT MAX(ts_minute) FROM calls").fetchone()[0]
+    newest = newest_call_minute(store)
     decisions = store.conn.execute("SELECT COUNT(*) FROM decisions WHERE kind!='advance_intent'").fetchone()[0]
     store.conn.execute(
         "INSERT INTO metrics_ext(sim_minute, credits, in_flight, next_deadline, newest_event_minute, decisions_total,"
@@ -103,7 +103,7 @@ def collect(store: Store) -> dict:
             "sim_lag_minutes": (now - ext["newest_event_minute"]) if ext and ext["newest_event_minute"] is not None else None,
             "credits_burn_24h": (credits_24h_ago[0]["credits"] - ext["credits"]) if credits_24h_ago and ext and ext["credits"] is not None else None,
             "page_alerts_24h": page[0]["n"] if page else 0, "digest_alerts_24h": digest[0]["n"] if digest else 0,
-            "calls": rows(store, "SELECT COUNT(*) AS n FROM calls")[0]["n"] if rows(store, "SELECT 1 FROM calls LIMIT 1") else 0}
+            "calls": (rows(store, "SELECT SUM(dials) AS n FROM cube") or [{}])[0].get("n") or 0}  # cube = calls, aggregated
 
 
 def render(m: dict) -> str:

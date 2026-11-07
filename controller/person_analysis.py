@@ -323,9 +323,8 @@ def maybe_run_daily(store: Store, now_minute: int) -> dict[str, dict] | None:
     last = store.get_job(JOB)
     if last is not None and last // MINUTES_PER_DAY == now_minute // MINUTES_PER_DAY:
         return None
-    out = run(store, now_minute)
-    store.set_job(JOB, "", now_minute)
-    return out
+    store.set_job(JOB, "", now_minute)  # mark the attempt first: a failing run must not retry (and alert) every tick
+    return run(store, now_minute)
 
 
 def render(report: Mapping[str, Mapping]) -> str:

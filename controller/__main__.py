@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -66,7 +67,11 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _latest_db(state_dir: str) -> Path | None:
-    dbs = sorted(Path(state_dir).glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    def activity(p: Path) -> float:  # under WAL a live DB's main file is rarely touched: its -wal file is
+        wal = p.with_name(p.name + "-wal")
+        return max(p.stat().st_mtime, wal.stat().st_mtime if wal.exists() else 0.0)
+
+    dbs = sorted(Path(state_dir).glob("*.db"), key=activity, reverse=True)
     return dbs[0] if dbs else None
 
 
@@ -98,12 +103,16 @@ def cmd_why(args: argparse.Namespace) -> int:
     if db is None or not db.exists():
         print(f"no state database found ({db or args.state_dir})")
         return 1
+    store = _open_ro(args)  # audit only reads: never run the schema script / migrations on a live DB
+    if store is None:
+        return 1
     try:
-        with Store(db) as store:
-            built = _build_why(store, args)
+        built = _build_why(store, args)
     except ValueError as exc:
         print(exc)
         return 2
+    finally:
+        store.close()
     rep, text = built  # type: ignore[misc]
     print(json.dumps(rep, indent=2, default=str) if args.json else text)
     return 0
@@ -116,7 +125,12 @@ def _open_ro(args: argparse.Namespace):
         print(f"no state database found ({db or args.state_dir})")
         return None
     try:
-        return view_data.open_readonly(db)
+        store = view_data.open_readonly(db)
+        # a 0-byte or non-SQLite file only fails on the first read; every controller store has a ``meta`` table
+        if not store.conn.execute("SELECT 1 FROM sqlite_master WHERE name='meta'").fetchone():
+            store.close()
+            raise sqlite3.DatabaseError("not a controller store (no meta table)")
+        return store
     except Exception as exc:  # noqa: BLE001 - a foreign/corrupt file must give a message, not a traceback
         print(f"cannot open {db} read-only: {exc}")
         return None
@@ -180,9 +194,10 @@ def cmd_person_analysis(args: argparse.Namespace) -> int:
     if db is None or not db.exists():
         print(f"no state database found ({db or args.state_dir})")
         return 1
-    store = view_data.open_readonly(db) if args.no_persist else Store(db)
+    persist = args.persist and not args.no_persist
+    store = Store(db) if persist else view_data.open_readonly(db)  # read-only unless --persist is explicit
     try:
-        report = person_analysis.run(store, view_data.now_minute(store), persist=not args.no_persist)
+        report = person_analysis.run(store, view_data.now_minute(store), persist=persist)
     finally:
         store.close()
     print(json.dumps(report, indent=2) if args.json else person_analysis.render(report))
@@ -232,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     pa = sub.add_parser("person-analysis", help="per-person call-time analysis of a store (analysis only, never config)")
     pa.add_argument("--state-dir", default=settings.DEFAULT_STATE_DIR)
     pa.add_argument("--db", default=None, help="explicit database file (default: newest in --state-dir)")
-    pa.add_argument("--no-persist", action="store_true", help="read-only: write no person_analysis rows or decision")
+    pa.add_argument("--persist", action="store_true", help="write person_analysis rows and a decision into the store (default: read-only)")
+    pa.add_argument("--no-persist", action="store_true", help="deprecated no-op: read-only is already the default")
     pa.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     logging.getLogger("httpx").setLevel(logging.WARNING)

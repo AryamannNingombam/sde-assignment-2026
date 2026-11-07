@@ -36,7 +36,7 @@ python -m controller status  --state-dir state            # loop health, latest 
 python -m controller view    --state-dir state --workflow nw_renewal [--at "Day 3 14:00"]
 python -m controller view    --state-dir state --weekly   # operational auto-applies for Compliance
 python -m controller why     --state-dir state --workflow nw_renewal --at "Day 3 14:00"
-python -m controller why     --state-dir state --lead <lead_id>
+python -m controller why     --state-dir state --lead <lead_id> [--day N]
 ```
 
 `status` shows: events ingested, ingest wall time, lag (wall seconds advance-return to decisions-done, and sim minutes
@@ -73,18 +73,20 @@ after it cleared (event alerts fire once per event); restarts do not re-alert.
 
 ### DIGEST (read in the morning)
 
-`person_analysis_failed` (the optional daily per-person analysis raised; the loop carried on and nothing was proposed: read the message, the job is off by default and can be ignored), `judgement_rejection` (an approver said no, nothing changed; the planner re-plans), `starved_experiment` (an arm has
+`judgement_rejection` (an approver said no, nothing changed; the planner re-plans), `starved_experiment` (an arm has
 under 100 connects after 2 days: it cannot conclude), `weak_base_did` (a number is simply weak, not a casualty of a
 probe), `kpi_drift` (pickup or engagement for the finished day is beyond |z| 3 of the hour-adjusted trailing 3-day
 level with no config change or incident that day: find out why before the next change).
+
+Also written, with severity `warn` (counted in neither the page nor the digest totals; read it in the `alerts` table only if you enabled the feature): `person_analysis_failed` (the optional daily per-person analysis raised; the loop carried on, nothing was proposed, and it is attempted at most once per sim day). `observability_rule_failed` (digest, once per sim day) means one alert rule itself raised: its alerts are missing until fixed, the other rules and the metrics are unaffected; the controller log has the stack trace. `hygiene_rejection` (page) is any approver rejection other than the "judgement call" decline (malformed request, missing validation evidence, pass rate too low): our local pre-check is wrong. `apply_by_passed` (page, once) is an APPROVED change still unapplied after its `apply_by`.
 
 ### Quick on-call triage
 
 1. `python -m controller status --state-dir state`: is `sim_minute` moving, is lag small, any PAGE alert in the last 24 h?
 2. A change you do not understand: `why --workflow W --at "Day N HH:MM"` (active version, proposal, approval, evidence, what superseded it).
-3. A customer question: `why --lead <workflow:lead_id> --day N`.
+3. A customer question: `why --lead <lead_id> --day N` (the plain lead id, not workflow-prefixed).
 4. Controller dead: re-run `./run.sh <url>`; it reconciles before acting (section 1). Do not delete `state/` mid-run.
-5. Optional feature: `ENABLE_PERSON_ANALYSIS` (`controller/settings.py`) is False because it cost +22% tick time on a short public_01 run (`SUBMISSION.md` section 12). It is analysis only and never writes config; to see its report on demand use `python -m controller person-analysis --db <store>`.
+5. Optional feature: `ENABLE_PERSON_ANALYSIS` (`controller/settings.py`) is False because it cost +22% tick time on a short public_01 run (`SUBMISSION.md` section 12). It is analysis only and never writes config; to see its report on demand use `python -m controller person-analysis --db <store>` (read-only by default; add `--persist` to write the `person_analysis` rows and a decision into the store).
 
 ## 5. Corrupted or foreign database
 

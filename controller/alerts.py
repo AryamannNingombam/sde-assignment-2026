@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
-from . import cube, incidents, metrics, settings
+from . import cube, incidents, metrics, settings, view_data
 from .audit import fmt_minute
 from .store import Store
 
@@ -34,7 +34,13 @@ STARVE_MIN_CONNECTS = 100
 STARVE_AFTER_DAYS = 2
 DRIFT_Z = 3.0
 DRIFT_MIN_BASE_N = 30
-HYGIENE_WORDS = ("fatigue", "must", "evidence", "pass rate")
+# The approver's own hygiene reasons (sim/world.py approval decision): any of these means OUR request was malformed or
+# mis-accounted, so it pages. Everything else (the "judgement call" decline, or no reason) is a digest. Never both.
+FATIGUE_REASON = "fatigue"
+HYGIENE_REASONS = (FATIGUE_REASON, "must all be non-empty", "must be a non-negative integer", "must be in [0,1]",
+                   "prompt changes need evidence", "validation pass rate")
+STARVE_MARKER = "eval:starved"
+RULE_FAILED_CODE = "observability_rule_failed"
 WHY = 'python -m controller why --workflow {wid} --at "{at}"'
 
 
@@ -47,18 +53,42 @@ class Alert:
     message: str
 
 
+def _is_hygiene(payload: str | None) -> bool:
+    text = (payload or "").lower()
+    return any(w in text for w in HYGIENE_REASONS)
+
+
 def _rows(store: Store, sql: str, args: tuple = ()) -> list[tuple]:
     return store.conn.execute(sql, args).fetchall()
 
 
 # ------------------------------------------------------------------ PAGE rules
+def _cube_workflows(store: Store) -> list[str]:
+    """Distinct workflow ids of the cube by skipping along its primary key (a DISTINCT would read every row)."""
+    out: list[str] = []
+    while True:
+        r = _rows(store, "SELECT workflow_id FROM cube WHERE workflow_id>? ORDER BY workflow_id LIMIT 1", (out[-1] if out else "",))
+        if not r:
+            return out
+        out.append(r[0][0])
+
+
+def _expected_calls(store: Store, lo: int, hi: int) -> int:
+    """Calls in sim minutes [lo, hi) from the hourly ``cube`` (hours that overlap the window count whole)."""
+    first, last = lo // 60, (hi - 1) // 60
+    total = 0
+    for wid in _cube_workflows(store):
+        total += _rows(store, "SELECT COALESCE(SUM(dials),0) FROM cube WHERE workflow_id=? AND day>=? AND day<=?"
+                              " AND day*24+hour>=? AND day*24+hour<=?", (wid, first // 24, last // 24, first, last))[0][0]
+    return total
+
+
 def ingest_stalled(store: Store, now: int, wall_lag_s: float = 0.0) -> list[Alert]:
-    newest = _rows(store, "SELECT MAX(ts_minute) FROM calls")[0][0]
+    newest = view_data.newest_call_minute(store)
     if newest is None:
         return []
     lag = now - newest
-    expected = _rows(store, "SELECT COUNT(*) FROM calls WHERE ts_minute>=? AND ts_minute<?",
-                     (now - STALL_SIM_MIN - DAY, now - DAY))[0][0] if lag > STALL_SIM_MIN else 0
+    expected = _expected_calls(store, now - STALL_SIM_MIN - DAY, now - DAY) if lag > STALL_SIM_MIN else 0
     if lag > STALL_SIM_MIN and expected >= STALL_MIN_EXPECTED:
         msg = (f"INGEST STALLED: newest stored call is {lag} sim min old ({fmt_minute(newest)}) although the same "
                f"{STALL_SIM_MIN} min yesterday had {expected} calls. Look: `python -m controller status` (lag, events ingested) and the "
@@ -76,6 +106,12 @@ def apply_by_near(store: Store, now: int) -> list[Alert]:
     for pid, wid, apply_by in _rows(store, "SELECT proposal_id, workflow_id, apply_by_minute FROM proposals WHERE state='APPROVED'"
                                     " AND apply_by_minute IS NOT NULL AND apply_by_minute-?<=?", (now, APPLY_BY_WARN_MIN)):
         left = apply_by - now
+        if left < 0:  # past the deadline is a different state: page once as lapse risk, never "-5 sim min left"
+            out.append(Alert(f"once:apply_by_passed:{pid}", PAGE, "apply_by_passed", wid,
+                             f"APPROVED change {pid} is still not applied and its apply_by ({fmt_minute(apply_by)}) has "
+                             f"passed {-left} sim min ago: it has lapsed or is about to. Look: `python -m controller view "
+                             f"--workflow {wid}` and `python -m controller why --workflow {wid} --at \"{fmt_minute(now)}\"`."))
+            continue
         out.append(Alert(f"cond:apply_by:{pid}", PAGE, "apply_by_near", wid,
                          f"APPROVED change {pid} is not applied and has {left} sim min left (apply_by {fmt_minute(apply_by)}); "
                          f"it lapses if missed. Look: `python -m controller view --workflow {wid}` (what we need) and "
@@ -115,11 +151,18 @@ def repeated_5xx(store: Store, now: int) -> list[Alert]:
 def accounting_bugs(store: Store, now: int) -> list[Alert]:
     """A fatigue rejection or a 403 means the controller's own accounting/pre-checks are wrong."""
     out = []
-    for approval_id, wid, payload in _rows(store, "SELECT approval_id, workflow_id, payload FROM proposal_events WHERE event='rejected'"
-                                           " AND payload LIKE '%fatigue%'"):
-        out.append(Alert(f"once:fatigue:{approval_id}", PAGE, "fatigue_rejection", wid,
-                         f"FATIGUE REJECTION on approval {approval_id} ({payload}): our request-accounting is wrong. Look: "
-                         f"`python -m controller why --workflow {wid} --at \"{fmt_minute(now)}\"` and the 24h ledger in governance."))
+    for approval_id, wid, payload in _rows(store, "SELECT approval_id, workflow_id, payload FROM proposal_events WHERE event='rejected'"):
+        if not _is_hygiene(payload):
+            continue
+        look = f"`python -m controller why --workflow {wid} --at \"{fmt_minute(now)}\"`"
+        if FATIGUE_REASON in (payload or "").lower():
+            out.append(Alert(f"once:fatigue:{approval_id}", PAGE, "fatigue_rejection", wid,
+                             f"FATIGUE REJECTION on approval {approval_id} ({payload}): our request-accounting is wrong. Look: "
+                             f"{look} and the 24h ledger in governance."))
+        else:
+            out.append(Alert(f"once:hygiene:{approval_id}", PAGE, "hygiene_rejection", wid,
+                             f"HYGIENE REJECTION on approval {approval_id} ({payload}): the request was malformed or lacked "
+                             f"evidence the approver requires, so our local pre-check is wrong. Look: {look}."))
     total = json.loads(store.get_meta("client_error_totals") or "{}").get("403", 0)
     if total:
         out.append(Alert(f"once:403:{total}", PAGE, "http_403", None,
@@ -148,8 +191,7 @@ def judgement_rejections(store: Store, now: int) -> list[Alert]:
             store, "SELECT p.proposal_id, p.workflow_id, p.kind, p.approval_id, "
                    "(SELECT e.payload FROM proposal_events e WHERE e.approval_id=p.approval_id AND e.event='rejected' LIMIT 1)"
                    " FROM proposals p WHERE p.state='REJECTED'"):
-        text = (payload or "").lower()
-        if any(w in text for w in HYGIENE_WORDS):
+        if _is_hygiene(payload):
             continue  # a hygiene rejection is a controller bug, not a judgement call: handled as a page
         out.append(Alert(f"once:rejected:{pid}", DIGEST, "judgement_rejection", wid,
                          f"The approver rejected {kind} ({pid}): {payload or 'no reason given'}. Nothing was changed. Look: "
@@ -157,7 +199,7 @@ def judgement_rejections(store: Store, now: int) -> list[Alert]:
     return out
 
 
-def starved_experiments(store: Store, now: int) -> list[Alert]:
+def _starved_now(store: Store, now: int) -> list[tuple[str, str, str]]:
     out = []
     for key, value in _rows(store, "SELECT key, value FROM detector_state WHERE detector='experiments'"):
         st = json.loads(value)
@@ -166,16 +208,27 @@ def starved_experiments(store: Store, now: int) -> list[Alert]:
             continue
         wid, dim = key.split(":", 1)
         col = {"welcome_message": "welcome", "voice": "voice"}[dim]
-        have = dict(_rows(store, f"SELECT {col}, COUNT(*) FROM calls WHERE workflow_id=? AND ts_minute>=? AND connected=1"
-                                 f" GROUP BY {col}", (wid, start)))
+        # the cube is calls aggregated by day/hour/variant: day granularity (the start day counts whole) is plenty here
+        have = {r.key[0]: r.connects for r in cube.rollup(store, wid, by=(col,), day_min=start // DAY)}
         thin = sorted(a for a, v in (st.get("arms") or {}).items()
                       if v.get("state") == "active" and have.get(a, 0) < STARVE_MIN_CONNECTS)
         if thin:
-            out.append(Alert(f"cond:starved:{key}", DIGEST, "starved_experiment", wid,
-                             f"{dim} experiment has run {(now - start) // DAY} days but arm(s) {', '.join(thin)} have under "
-                             f"{STARVE_MIN_CONNECTS} connects: not enough traffic to ever conclude. Look: "
-                             f"`python -m controller view --workflow {wid}` (WHAT'S BEING TESTED)."))
+            out.append((key, wid, f"{dim} experiment has run {(now - start) // DAY} days but arm(s) {', '.join(thin)} have under "
+                                  f"{STARVE_MIN_CONNECTS} connects: not enough traffic to ever conclude. Look: "
+                                  f"`python -m controller view --workflow {wid}` (WHAT'S BEING TESTED)."))
     return out
+
+
+def starved_experiments(store: Store, now: int) -> list[Alert]:
+    """Once per sim day (the answer is cached in ``detector_state`` so the condition stays active between checks)."""
+    day = now // DAY
+    marker = _rows(store, "SELECT value FROM detector_state WHERE detector=? AND key=?", (DETECTOR, STARVE_MARKER))
+    cached = json.loads(marker[0][0]) if marker else None
+    if cached is None or cached["day"] != day:
+        cached = {"day": day, "found": _starved_now(store, now)}
+        store.conn.execute("INSERT OR REPLACE INTO detector_state(detector, key, value) VALUES (?,?,?)",
+                           (DETECTOR, STARVE_MARKER, json.dumps(cached)))
+    return [Alert(f"cond:starved:{key}", DIGEST, "starved_experiment", wid, msg) for key, wid, msg in cached["found"]]
 
 
 def weak_base(store: Store, now: int) -> list[Alert]:
@@ -238,13 +291,23 @@ def kpi_drift(store: Store, now: int) -> list[Alert]:
 
 # ------------------------------------------------------------------ engine
 def evaluate(store: Store, now: int, credits: float | None = None, wall_lag_s: float = 0.0) -> list[Alert]:
+    """Run every rule on its own: one raising rule is logged and digested (once a day), the others still run."""
+    rules = (("ingest_stalled", lambda: ingest_stalled(store, now, wall_lag_s)), ("apply_by_near", lambda: apply_by_near(store, now)),
+             ("credits_low", lambda: credits_low(store, credits)), ("repeated_5xx", lambda: repeated_5xx(store, now)),
+             ("accounting_bugs", lambda: accounting_bugs(store, now)), ("cohort_mismatch", lambda: cohort_mismatch(store, now)),
+             ("judgement_rejections", lambda: judgement_rejections(store, now)),
+             ("starved_experiments", lambda: starved_experiments(store, now)),
+             ("weak_base", lambda: weak_base(store, now)), ("kpi_drift", lambda: kpi_drift(store, now)))
     found: list[Alert] = []
-    for rule in (lambda: ingest_stalled(store, now, wall_lag_s), lambda: apply_by_near(store, now),
-                 lambda: credits_low(store, credits), lambda: repeated_5xx(store, now),
-                 lambda: accounting_bugs(store, now), lambda: cohort_mismatch(store, now),
-                 lambda: judgement_rejections(store, now), lambda: starved_experiments(store, now),
-                 lambda: weak_base(store, now), lambda: kpi_drift(store, now)):
-        found += rule()
+    for name, rule in rules:
+        try:
+            found += rule()
+        except Exception as exc:  # noqa: BLE001 - one broken rule must not silence the others
+            log.exception("alert rule %s failed at sim minute %d", name, now)
+            found.append(Alert(f"once:rule_failed:{name}:{now // DAY}", DIGEST, RULE_FAILED_CODE, None,
+                               f"Alert rule `{name}` raised {type(exc).__name__}: {exc}. Its alerts are missing until fixed; the "
+                               "other rules and metrics are unaffected. Look: the controller log (stack trace) and "
+                               "`python -m controller status`."))
     return found
 
 

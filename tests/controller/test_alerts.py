@@ -28,6 +28,14 @@ def add_call(store, event_id, minute, wid="wf"):
         "INSERT INTO calls(event_id, workflow_id, ts_minute, day, hour, lid, attempt_no, config_version, cohort_id, welcome,"
         " voice, caller_id, prompt, connected, engaged) VALUES (?,?,?,?,?,1,1,1,'default','W1','V1','D1','P1',1,0)",
         (event_id, wid, minute, minute // DAY, minute % DAY // 60))
+    _cube_call(store, wid, minute, "W1", 1)
+
+
+def _cube_call(store, wid, minute, welcome, connected):
+    """Ingest keeps the hourly cube in step with calls; the per-tick alert rules read the cube, not calls."""
+    store.conn.execute("INSERT INTO cube VALUES (?,?,?,0,?,'V1','D1','P1',1,?,0,0,0) ON CONFLICT DO UPDATE SET"
+                       " dials=dials+1, connects=connects+excluded.connects",
+                       (wid, minute // DAY, minute % DAY // 60, welcome, connected))
 
 
 def test_apply_by_near_pages_once_then_clears_and_refires(store):
@@ -125,6 +133,7 @@ def test_starved_experiment_digest_and_clears(store):
             "INSERT INTO calls(event_id, workflow_id, ts_minute, day, hour, lid, attempt_no, config_version, cohort_id, welcome,"
             " voice, caller_id, prompt, connected, engaged) VALUES (?,?,?,0,10,1,1,1,'d','W2','V1','D1','P1',1,0)",
             (i, "wf", 10))
+        _cube_call(store, "wf", 10, "W2", 1)
     got = tick(store, 3 * DAY)
     assert [a.code for a in got] == ["starved_experiment"] and "W3" in got[0].message and "W2" not in got[0].message
 
