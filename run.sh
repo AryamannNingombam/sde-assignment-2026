@@ -3,6 +3,7 @@
 # Exits 0 only when the controller exits 0 (it does so only once /sim/state
 # reports finished). Crashes are restarted; the controller resumes from SQLite.
 # Exit codes: 0 finished, 1 restart cap reached, 2 no usable python, 3 sim never came up.
+# Docker: not used. Plain bash + Python 3.13; dependencies come from requirements.txt (see SUBMISSION.md section 15).
 set -u
 SIM_URL="${1:?usage: ./run.sh <SIM_URL>}"
 SIM_URL="${SIM_URL%/}"

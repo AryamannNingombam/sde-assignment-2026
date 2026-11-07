@@ -21,7 +21,7 @@ If the **simulator** restarts, it is a new world: the controller detects the reg
 
 * `state/<scenario>-<fingerprint8>.db` (+ `-wal`, `-shm`): the only state. WAL mode, one writer (the controller).
   The fingerprint is scenario + hash of the first history line, so a different world gets a different file.
-* **The DB file must be on a persistent volume.** It is the only copy of the `decisions` audit trail (why every change was made), detector state and the credit ledger. Re-ingesting from the simulator rebuilds calls and leads, not decisions. Back it up (copy while the controller is stopped, or use `sqlite3 .backup`).
+* **The DB file must be on a persistent volume.** It is the only copy of the `decisions` audit trail (why every change was made), detector state and the credit ledger. Re-ingesting from the simulator rebuilds calls and leads, not decisions (the production plan in `SUBMISSION.md` section 14 mirrors `decisions` to Postgres). Back it up (copy while the controller is stopped, or use `sqlite3 .backup`).
 * `runs/`: simulator run directories and grade inputs (not controller state).
 * `reports/`: grade reports and the crash-test log.
 
@@ -48,6 +48,8 @@ you, what changed today (each change has its own `why` command), open incidents 
 trailing three days (pickup and engagement are always separate numbers). `ui` serves the same content as web pages
 (`/`, `/wf/<id>`, `/weekly`, `/why?workflow=&at=`, `/status`); it opens the DB `mode=ro`, so it is safe beside a live run.
 If the port is busy it exits 1 and says so: pass `--port`.
+
+`why` prints a six-line plain-English header (what, why, who, when, what happened next) before the details; add `--verbose` for raw decision inputs and every experiment look row, `--json` for everything. How to run, configure (env vars), extend and regenerate a state DB: `SUBMISSION.md` section 15.
 
 Add `--db path/to.db` to any of these to point at a specific file (default: the newest `*.db` in `--state-dir`).
 
@@ -103,12 +105,13 @@ exits at startup with a SQLite error.
 ## 6. Crash test and dev scenarios
 
 ```
-python scripts/crash_test.py                            # public_02: kill at each fault point + 3 random kills; exit 0 iff invariants hold
-python scripts/crash_test.py --random-kills 5           # log: reports/crash_test.log
+python scripts/crash_test.py                            # public_02: kill at each fault point + 10 random kills (default seed 7); exit 0 iff invariants hold
+                                                        # this exact command produced reports/crash_test.log (defaults: --scenario scenarios/public_02_incidents.yaml --random-kills 10 --seed 7)
+python scripts/crash_test.py --random-kills 3           # a shorter run
 bash scripts/dev_run.sh <name> <scenario.yaml> <report.md> [port]   # baseline + serve + controller + grade
-bash scripts/dev_run.sh null01 devscenarios/null_01.yaml reports/dev_null_01.md 8710
-bash scripts/dev_run.sh kyc_flag devscenarios/kyc_flag.yaml reports/dev_kyc_flag.md 8711
-bash scripts/dev_run.sh bad_default devscenarios/bad_default.yaml reports/dev_bad_default.md 8712
+bash scripts/dev_run.sh null01 devscenarios/null_01.yaml reports/dev/null_01.md 8710
+bash scripts/dev_run.sh kyc_flag devscenarios/kyc_flag.yaml reports/dev/kyc_flag.md 8711
+bash scripts/dev_run.sh bad_default devscenarios/bad_default.yaml reports/dev/bad_default.md 8712
 python scripts/mc_null.py                               # Monte Carlo false-promotion rate of the experiment rule
 python -m pytest -q tests                               # full suite (a few minutes)
 ```
