@@ -34,10 +34,9 @@ def active_cell_counts(store: Store, wid: str, now: int, cadence_days: int) -> d
     """Active in-cadence leads per cell: campaign younger than the cadence, no engaged call yet."""
     rows = store.conn.execute(
         "SELECT l.cell, COUNT(*) FROM leads l JOIN campaigns c ON c.campaign_id=l.campaign_id"
-        " WHERE l.workflow_id=? AND ? - (c.ts_minute / ?) < ?"
+        " WHERE l.workflow_id=? AND ? - ((c.ts_minute - (((c.ts_minute % ?) + ?) % ?)) / ?) < ?"
         " AND NOT EXISTS (SELECT 1 FROM calls k WHERE k.lid=l.lid AND k.engaged=1)"
-        " GROUP BY l.cell", (wid, now // settings.MINUTES_PER_DAY, settings.MINUTES_PER_DAY,
-                             cadence_days)).fetchall()
+        " GROUP BY l.cell", (wid, now // settings.MINUTES_PER_DAY, *(settings.MINUTES_PER_DAY,) * 4, cadence_days)).fetchall()
     return {cell: n for cell, n in rows}
 
 

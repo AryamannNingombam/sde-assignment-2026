@@ -195,10 +195,13 @@ def complete_hours(table: Mapping, wf: Mapping, where: str, allow_zero: bool) ->
     lo, hi = wf["dialling_window"]
     clean: dict[str, float] = {}
     for h, w in table.items():
-        hour = int(h)
+        try:
+            hour = int(h)
+        except (TypeError, ValueError):
+            raise ProposalError([f"{where}: hour key {h!r} is not an integer"]) from None
         if not lo <= hour < hi:
             raise ProposalError([f"{where}: hour {hour} outside window [{lo},{hi})"])
-        if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0:
+        if (isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or w < 0):
             raise ProposalError([f"{where}.{h}: weight must be a number >= 0"])
         if w == 0 and not allow_zero:
             raise ProposalError([f"{where}.{h}: zero weight without allow_zero_hours"])

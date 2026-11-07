@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 DETECTOR = "schedule"
 DAY = settings.MINUTES_PER_DAY
 MONITORING, VERIFIED, ROLLBACK, ROLLED_BACK = "monitoring", "verified", "rollback", "rolled_back"
+PARTITION_HISTORY = 7  # partition log entries kept in the persisted state
+_SCHEDULE_KINDS = ("schedule_bundle", "schedule_refresh")
 _FLOOR = "(cp.ts_minute - (((cp.ts_minute % 1440) + 1440) % 1440)) / 1440"
 STRATA_SQL = ("SELECT l.cell, c.hour, c.attempt_no, c.day - " + _FLOOR + " AS cd, COUNT(*), SUM(c.connected),"
               " SUM(c.engaged) FROM calls c JOIN leads l ON l.lid=c.lid JOIN campaigns cp ON"
@@ -95,17 +97,26 @@ def _tables_of(cfg: Mapping) -> dict:
 
 
 # ------------------------------------------------------------------ partition + plan
-def _build_partition(ctx: PlanContext, wid: str, st: dict) -> None:
-    wf = ctx.workflows[wid]
-    hours = list(range(*wf["dialling_window"]))
+def _learn_partition(ctx: PlanContext, wid: str):
+    hours = list(range(*ctx.workflows[wid]["dialling_window"]))
     rows = [(r.key[0], r.key[1], r.dials, r.connects) for r in cube.rollup(ctx.store, wid, by=("hour", "cell"))]
-    part = select_partition(rows, _vocab(ctx.store), hours)
+    return select_partition(rows, _vocab(ctx.store), hours)
+
+
+def _build_partition(ctx: PlanContext, wid: str, st: dict) -> None:
+    """(Re)learn the partition from the data so far; a changed result replaces the pending one."""
+    part = _learn_partition(ctx, wid)
+    new = part.as_dict() if part else None
     st["partition_day"] = ctx.now // DAY
-    st["partition"] = part.as_dict() if part else None
-    st.setdefault("partitions", []).append({"day": ctx.now // DAY, "minute": ctx.now, "partition": st["partition"]})
+    if st.get("partitions") and new == st.get("partition"):
+        return
+    st["partition"] = new
+    log_ = st.setdefault("partitions", [])
+    log_.append({"day": ctx.now // DAY, "minute": ctx.now, "partition": new})
+    del log_[:-PARTITION_HISTORY]
     msg = (f"cohort partition by {'+'.join(part.features)}: {len(part.cohorts)} cohorts (n_min {part.n_min} dials,"
            f" interaction z {part.score:.1f})" if part else "no partition beats the pooled hour profile")
-    ctx.store.add_decision(ctx.now, "cohort_partition", msg, wid, st["partition"] or {"candidates": "none"})
+    ctx.store.add_decision(ctx.now, "cohort_partition", msg, wid, new or {"candidates": "none"})
 
 
 def _plan(ctx: PlanContext, wid: str, st: dict, cfg: tuple[int, dict]) -> None:
@@ -164,17 +175,31 @@ def _applied_minute(store, wid: str, version: int, now: int) -> int:
     return int(row[0]) if row and row[0] is not None else now
 
 
+def _our_proposal(store, wid: str, version: int) -> dict | None:
+    """Body of the schedule proposal that produced config ``version`` (None: someone else's change)."""
+    row = store.conn.execute(
+        "SELECT p.body FROM config_versions c JOIN proposals p ON p.proposal_id=c.proposal_id"
+        " WHERE c.workflow_id=? AND c.version=? AND p.kind IN (?,?)", (wid, version, *_SCHEDULE_KINDS)).fetchone()
+    return json.loads(row[0]) if row and row[0] else None
+
+
 def _detect_apply(ctx: PlanContext, wid: str, st: dict, cfg: tuple[int, dict]) -> None:
-    plan = st.get("plan")
-    live = _tables_of(cfg[1])
-    if not plan or not live or live != plan["tables"] or st.get("applied", {}).get("tables") == live:
+    """Our apply = live tables equal today's plan, or the live version came from our own schedule proposal
+    (the plan is refit daily, so an apply a day or more after the filing no longer matches today's plan)."""
+    plan, live = st.get("plan"), _tables_of(cfg[1])
+    if not live or st.get("applied", {}).get("tables") == live:
         return
+    body = None if plan and live == plan["tables"] else _our_proposal(ctx.store, wid, cfg[0])
+    if not (plan and live == plan["tables"]) and body is None:
+        return
+    estimate = ((body or {}).get("request", {}).get("dry_run", {}).get("schedule_guardrail")
+                or (plan or {}).get("estimate") or {})
     minute = _applied_minute(ctx.store, wid, cfg[0], ctx.now)
     st["applied"] = {"minute": minute, "version": cfg[0], "tables": live, "status": MONITORING,
-                     "estimate": plan["estimate"]}
+                     "estimate": estimate}
     ctx.store.add_decision(ctx.now, "schedule_applied", f"per-cohort call times live since {clock(minute)}"
                            f" (config v{cfg[0]}); verifying hour-mix-adjusted pickup", wid,
-                           {"version": cfg[0], "estimate": plan["estimate"]})
+                           {"version": cfg[0], "estimate": estimate})
 
 
 def _period(ctx: PlanContext, wid: str, assign, lo_hour: int, hi_hour: int) -> dict:
@@ -228,7 +253,7 @@ def schedule_detector(ctx: PlanContext) -> None:
             continue
         st = load_state(ctx.store, DETECTOR, wid)
         before = json.dumps(st, sort_keys=True)
-        if not st.get("partition") and st.get("partition_day") != ctx.now // DAY and not cfg[1].get("cohorts"):
+        if st.get("partition_day") != ctx.now // DAY and not cfg[1].get("cohorts"):
             _build_partition(ctx, wid, st)
         _plan(ctx, wid, st, cfg)
         _detect_apply(ctx, wid, st, cfg)
