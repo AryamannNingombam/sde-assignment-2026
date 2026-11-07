@@ -1,5 +1,7 @@
 # Guardrail selection-effect analysis (devscenario null_01)
 
+> Run on an earlier `null_01` run (ALL -0.9%), not the final one (`reports/dev/null_01.md`, ALL -1.3%); the decomposition was not re-run.
+
 Question: in `null_01` the engagement guardrail metric (engaged / connected) fell versus the no-op baseline although no
 harmful change was applied (ks_cancel -1.0%, nw_kyc -1.9%, nw_renewal -1.2%, ALL -0.9% in this run; -2.6% / -0.3% / 0.0%
 in an earlier run of the same scenario). Hypothesis: higher pickup puts more repeat connects of low-propensity leads in

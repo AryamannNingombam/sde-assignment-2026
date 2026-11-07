@@ -1,8 +1,7 @@
 # Context Document — Outcome-First Agent Loop (Formi SDE assignment)
 
 > **Audience:** the candidate, plus any engineer or AI agent who picks up this work later.
-> **Status:** plan approved 2026-11-06; no controller code written yet. Reviewed by five fresh-context "Elephant Goldfish" reviewers (log in §15).
-> **Next step:** Phase 0.2 onwards (§9), once the candidate gives the go-ahead. Step 0.1 (saving this file as `docs/CONTEXT.md`) is done.
+> **Status:** implemented; see SUBMISSION.md for what shipped and THRESHOLDS.md for deviations.
 > **Decisions taken** (§14): Python + SQLite; scope "Bigger" (A/B/Bigger offered), with per-person call time reduced to *analysis-only* after review;
 > conservative exploration; a budget of about 20–24 hours.
 

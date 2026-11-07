@@ -1,5 +1,7 @@
-# public_01 with no effects and no incidents, seed 1101: any change or incident the controller
-# opens here is a false positive.
+# public_01 with no injected effects and no injected incidents, seed 1101. The simulator's load
+# fatigue is still active, so caller-ID spreads and a flagged DID can be real fatigue relief. Any
+# welcome, voice or schedule change that wins here is a false positive; caller-ID changes are not
+# necessarily one.
 # DEV ONLY: the controller never reads this file (rule R1).
 name: null_01
 seed: 1101

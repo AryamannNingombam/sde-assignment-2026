@@ -4,6 +4,7 @@
 set -u
 TAG="$1"; SCEN="$2"; PORT="$3"
 cd "$(dirname "$0")/.."
+mkdir -p runs state
 rm -rf "runs/det_$TAG" "state/det_$TAG"
 PYTHONHASHSEED="${SIMSEED:-random}" python -m sim serve --scenario "$SCEN" --run-dir "runs/det_$TAG" --port "$PORT" --force > "runs/det_$TAG.serve.log" 2>&1 &
 SPID=$!

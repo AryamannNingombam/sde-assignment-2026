@@ -25,9 +25,11 @@ If the **simulator** restarts, it is a new world: the controller detects the reg
 * `runs/`: simulator run directories and grade inputs (not controller state).
 * `reports/`: grade reports and the crash-test log.
 
-Key tables: `calls`, `cube` (rollups), `config_versions` (every config, actor), `proposals` + `proposal_events`
-(approval state machine), `decisions` (the audit trail: every detector verdict with inputs), `incidents`,
-`detector_state` (experiment / DID / halluc state machines), `alerts`, `metrics`, `metrics_ext`.
+Tables (`controller/schema.sql`; `metrics_ext` is created by `controller/metrics.py`): `meta`, `ingest_cursor`, `campaigns`, `leads`,
+`calls`, `cube` (rollups), `config_versions` (every config, actor), `cohort_defs`, `experiments`, `arms`, `proposals` +
+`proposal_events` (approval state machine), `decisions` (the audit trail: every detector verdict with inputs), `incidents`,
+`validation_runs` + `llm_calls` (credit ledger), `jobs`, `detector_state` (experiment / DID / halluc state machines),
+`alerts`, `tick_phases`, `metrics`, `metrics_ext`, `exp_day_cache`.
 
 ## 3. Reading the loop without reading logs
 
@@ -78,7 +80,7 @@ under 100 connects after 2 days: it cannot conclude), `weak_base_did` (a number 
 probe), `kpi_drift` (pickup or engagement for the finished day is beyond |z| 3 of the hour-adjusted trailing 3-day
 level with no config change or incident that day: find out why before the next change).
 
-Also written, with severity `warn` (counted in neither the page nor the digest totals; read it in the `alerts` table only if you enabled the feature): `person_analysis_failed` (the optional daily per-person analysis raised; the loop carried on, nothing was proposed, and it is attempted at most once per sim day). `observability_rule_failed` (digest, once per sim day) means one alert rule itself raised: its alerts are missing until fixed, the other rules and the metrics are unaffected; the controller log has the stack trace. `hygiene_rejection` (page) is any approver rejection other than the "judgement call" decline (malformed request, missing validation evidence, pass rate too low): our local pre-check is wrong. `apply_by_passed` (page, once) is an APPROVED change still unapplied after its `apply_by`.
+Also written, with severity `warn` (counted in neither the page nor the digest totals; read it in the `alerts` table only if you enabled the feature): `tick_step_failed`, `did_workflow_error`, `schedule_workflow_error`, `experiments_workflow_error`, `halluc_workflow_error`, `apply_window_unreachable`, `prompt_bar_unreachable` and `approval_missing` (severity `error`, once per sim day: a loop step or one workflow's detector raised, the policy's apply window is shorter than a tick, every catalogue prompt validates below the bar, or an approval vanished at the sim; `view` counts them by code, the controller log has the stack trace, and the loop carries on), and `detector_failed` / `producer_failed` / `veto_failed` (severity `warn`). `person_analysis_failed` (the optional daily per-person analysis raised; the loop carried on, nothing was proposed, and it is attempted at most once per sim day). `observability_rule_failed` (digest, once per sim day) means one alert rule itself raised: its alerts are missing until fixed, the other rules and the metrics are unaffected; the controller log has the stack trace. `hygiene_rejection` (page) is any approver rejection other than the "judgement call" decline (malformed request, missing validation evidence, pass rate too low): our local pre-check is wrong. `apply_by_passed` (page, once) is an APPROVED change still unapplied after its `apply_by`.
 
 ### Quick on-call triage
 
@@ -110,11 +112,13 @@ exits at startup with a SQLite error.
 python scripts/crash_test.py                            # public_02: kill at each fault point + 10 random kills (default seed 7); exit 0 iff invariants hold
                                                         # this exact command produced reports/crash_test.log (defaults: --scenario scenarios/public_02_incidents.yaml --random-kills 10 --seed 7)
 python scripts/crash_test.py --random-kills 3           # a shorter run
+python scripts/crash_test.py --scenario scenarios/public_01_dev.yaml --log reports/crash_test_public_01.log   # the arguments for a log like reports/crash_test_public_01.log
 bash scripts/dev_run.sh <name> <scenario.yaml> <report.md> [port]   # baseline + serve + controller + grade
 bash scripts/dev_run.sh null01 devscenarios/null_01.yaml reports/dev/null_01.md 8710
 bash scripts/dev_run.sh kyc_flag devscenarios/kyc_flag.yaml reports/dev/kyc_flag.md 8711
 bash scripts/dev_run.sh bad_default devscenarios/bad_default.yaml reports/dev/bad_default.md 8712
-python scripts/mc_null.py                               # Monte Carlo false-promotion rate of the experiment rule
+bash scripts/dev_run.sh policy_strict devscenarios/policy_strict.yaml reports/dev/policy_strict.md 8713   # also null_02, renamed_ids
+python scripts/mc_null.py --runs 800 --power-runs 300 --decay-runs 250   # reproduces reports/mc_null.md (script defaults are 1000 / 400 / 300)
 python -m pytest -q tests                               # full suite (a few minutes)
 ```
 

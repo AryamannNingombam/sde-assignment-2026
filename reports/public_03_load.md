@@ -1,5 +1,7 @@
 # public_03_load: load test (12 workflows, 840,000 events per sim day, 5 sim days)
 
+> Day 0, ingest rate, RSS and DB size superseded by `public_03_load_review2.md` (history fast path); days 1-4 stand as measured before it.
+
 Command: `python scripts/load_test.py` (serves the scenario, runs `python -m controller run` with every feature on, samples
 wall clock, controller RSS and DB size every 10 s, then summarises the controller's own `metrics` and `tick_phases` tables).
 Windows 10, 8 cores, Python 3.13, simulator and controller on the same laptop, SQLite on local disk. The run went to the END

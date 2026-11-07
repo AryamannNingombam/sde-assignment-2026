@@ -1,5 +1,7 @@
 # Phase 1 ingest timing - public_03_load, one simulated day
 
+> Superseded: early phase-1 measurement with fewer features enabled; see `public_03_load.md` and `public_03_load_review2.md`.
+
 Command: `python -m controller run --url http://127.0.0.1:8701 --state-dir state --max-sim-minutes 1440`
 (Windows 10, Python 3.13, sim server and controller on the same laptop, SQLite on local disk.)
 
