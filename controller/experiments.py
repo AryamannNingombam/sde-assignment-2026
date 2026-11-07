@@ -18,11 +18,11 @@ import json
 import logging
 from typing import Mapping
 
-from . import exp_alloc, exp_data, exp_decay, exp_reconcile, exp_stats as es, exp_proposals as prop, exp_rules as er, exp_state as xs, settings
+from . import exp_alloc, exp_data, exp_decay, exp_entry, exp_interactions, exp_reconcile, exp_stats as es, exp_proposals as prop, exp_rules as er, exp_state as xs, settings
 from .cohorts import VOCAB_META_KEY, FeatureVocab
 from .desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from .detectors import did_plan
-from .detectors.common import latest_config, note_once
+from .detectors.common import latest_config, note_once, once_alert
 
 log = logging.getLogger(__name__)
 DAY = settings.MINUTES_PER_DAY
@@ -37,9 +37,9 @@ def _auto_ok(wf: Mapping, dim: str) -> bool:
     return bool(pol.get("enabled")) and dim in pol.get("allowed_dims", []) and float(pol.get("max_shift") or 0) > 0
 
 
-def _look_minute(wf: Mapping) -> int:
+def _look_minute(wf: Mapping, tick: int = settings.TICK_MINUTES) -> int:
     """Minute of the day from which the daily look runs: the window end, or the day's last tick when it ends at 24."""
-    return min(wf["dialling_window"][1] * 60, DAY - settings.TICK_MINUTES)
+    return min(wf["dialling_window"][1] * 60, DAY - tick)
 
 
 def _guard(wf: Mapping) -> float:
@@ -77,19 +77,44 @@ def _set_desired(st: dict, weights, kind: str, summary: str, rationale: str, *, 
                      "evidence": dict(extra or {}), "impact": impact, "prev": prev}
 
 
-def _plan_entry(ctx: PlanContext, st: dict, wid: str, dim: str) -> None:
-    challengers = [o for o in st["options"] if o != st["control"] and o not in st["excluded"]]
-    shares = exp_alloc.entry_shares(challengers)
+def _plan_entry(ctx: PlanContext, st: dict, wid: str, dim: str, cfg: tuple[int, dict]) -> None:
+    shares, incumbents, untested = exp_alloc.entry_plan(st["live"], st["control"], st["options"], st["excluded"])
+    new = [a for a in shares if a not in incumbents]
+    if new and not _entry_powered(ctx, st, wid, dim, cfg, new):
+        for a in new:
+            shares.pop(a)
+        untested = untested + new
     if not shares:
         return
-    st["shares"], st["family"] = shares, sorted(shares)
+    st["shares"], st["family"], st["incumbents"] = shares, sorted(shares), incumbents
     st["arms"] = {a: {"state": "active"} for a in shares}
-    st["untested"] = [o for o in challengers if o not in shares]
+    st["untested"] = untested
     weights = exp_alloc.weights(st["control"], shares)
+    if xs.same_dist(weights, st["live"]):  # nothing to change (incumbents only): the experiment is simply running
+        st["phase"], st["applied"] = xs.RUNNING, {"kind": "experiment_entry", "minute": ctx.now}
+        ctx.store.add_decision(ctx.now, "experiment_entry", f"{dim}: the live split {prop.weights_text(weights)} is the entry; "
+                               "incumbents are analysed as arms, no change proposed", wid,
+                               {"dim": dim, "control": st["control"], "shares": shares, "weights": weights, "no_change": True})
+        return
     summary, rationale, impact = prop.entry(dim, st["control"], weights, st["note"])
     _set_desired(st, weights, "experiment_entry", summary, rationale, then=xs.RUNNING, impact=impact)
     ctx.store.add_decision(ctx.now, "experiment_entry", summary, wid,
-                           {"dim": dim, "control": st["control"], "shares": shares, "weights": weights})
+                           {"dim": dim, "control": st["control"], "shares": shares, "weights": weights,
+                            "incumbents": incumbents})
+
+
+def _entry_powered(ctx, st, wid, dim, cfg, new: list) -> bool:
+    """False (and re-check tomorrow) when a new challenger cannot be projected to reach a test over the rest of the run."""
+    proj = exp_entry.projected_arm_connects(ctx, wid, dim, cfg[1], settings.EXP_ENTRY_SHARE)
+    if proj is None or proj >= exp_entry.MIN_PROJECTED_ARM_CONNECTS:
+        return True
+    st["not_before"] = ctx.now + DAY
+    ctx.store.add_decision(ctx.now, "experiment_entry_skipped", f"{dim}: no entry, a challenger at {settings.EXP_ENTRY_SHARE:.1%} is "
+                           f"projected to get {proj:.0f} connects over the rest of the run (< {exp_entry.MIN_PROJECTED_ARM_CONNECTS} "
+                           "needed to be tested); re-checking daily", wid,
+                           {"dim": dim, "projected_connects": round(proj, 1), "needed": exp_entry.MIN_PROJECTED_ARM_CONNECTS,
+                            "challengers": new})
+    return False
 
 
 def _on_applied(ctx: PlanContext, st: dict, wid: str, dim: str, minute: int) -> None:
@@ -151,6 +176,19 @@ def _interrupt(ctx: PlanContext, st: dict, wid: str, dim: str, cfg, version: int
     return fresh
 
 
+def _pause_for_edit(ctx, st: dict, wid: str, dim: str, version: int, minute: int, dist: Mapping) -> None:
+    """A supervisor edit of a not-yet-exposed dim: drop our pending entry and wait out the cooldown before re-planning."""
+    st["not_before"] = max(st["not_before"], minute + settings.EXP_SUPERVISOR_COOLDOWN_MINUTES)
+    dropped = st["desired"] is not None
+    st["desired"] = None
+    if st["phase"] == xs.PENDING:
+        st["control"] = xs.top_option(dist)
+    ctx.store.add_decision(ctx.now, "experiment_supervisor_edit_pending", f"supervisor edit of {dim} at {xs.clock(minute)} "
+                           f"(v{version}) while the experiment is {st['phase']}: {'pending proposal dropped, ' if dropped else ''}"
+                           f"no entry before {xs.clock(st['not_before'])}", wid,
+                           {"dim": dim, "version": version, "dist": dict(dist), "not_before": st["not_before"]})
+
+
 def _watch(ctx: PlanContext, st: dict, wid: str, dim: str, cfg: tuple[int, dict]) -> dict:
     """Applied detection and supervisor-edit detection from the mirrored config versions."""
     rows = ctx.store.conn.execute("SELECT version, actor, ts_minute, body FROM config_versions WHERE workflow_id=?"
@@ -166,10 +204,17 @@ def _watch(ctx: PlanContext, st: dict, wid: str, dim: str, cfg: tuple[int, dict]
             continue
         body_cfg = json.loads(body)
         dist, over = xs.live_dist(body_cfg, dim), xs.cohort_overrides(body_cfg, dim)
+        minute = ts if ts is not None else ctx.now
+        if actor != "supervisor" and st["desired"] and xs.desired_matches(body_cfg, dim, st["desired"]):
+            _on_applied(ctx, st, wid, dim, minute)  # our change landed: later versions are judged against it
+            st["live"], st["live_cohorts"], st["seen_version"] = dist, over, version
+            continue
         exposed = st["phase"] in (xs.RUNNING, xs.PROMOTED)
         edited = not xs.same_dist(dist, st["live"]) or not xs.same_overrides(over, st.get("live_cohorts") or {})
         if actor == "supervisor" and exposed and edited:
-            return _interrupt(ctx, st, wid, dim, cfg, version, ts if ts is not None else ctx.now, dist)
+            return _interrupt(ctx, st, wid, dim, cfg, version, minute, dist)
+        if actor == "supervisor" and edited:
+            _pause_for_edit(ctx, st, wid, dim, version, minute, dist)
         st["live"], st["live_cohorts"], st["seen_version"] = dist, over, version
     live_dist = xs.live_dist(cfg[1], dim)
     if st["desired"] and xs.desired_matches(cfg[1], dim, st["desired"]):
@@ -243,7 +288,7 @@ def _start(ctx: PlanContext, st: dict, wid: str, dim: str) -> int | None:
     return st["start_minute"]
 
 
-def _scope_look(ctx, st, wid, dim, wf, name, alpha, cells, active, exposure_days, start):
+def _scope_look(ctx, st, wid, dim, wf, name, alpha, cells, active, exposure_days, start, report: Mapping | None = None):
     data = exp_data.load_arms(ctx.store, wid, dim, start, ctx.now, cells)
     sc = st["scopes"][name]
     out = er.daily_look(data, st["control"], active, len(st["family"]), alpha, arm_t=sc["arm_t"],
@@ -255,7 +300,7 @@ def _scope_look(ctx, st, wid, dim, wf, name, alpha, cells, active, exposure_days
         for a, r in sorted(out.records.items()) if r["ok"]) + (f" [look {out.look_index}]" if out.took_look else ""), wid,
         {"dim": dim, "scope": name, "control": st["control"], "alpha": alpha, "took_look": out.took_look,
          "look_index": out.look_index, "records": out.records, "drop": out.drop, "ramp": out.ramp,
-         "winner": out.winner, "family": st["family"], "exposure_days": round(exposure_days, 2)})
+         "winner": out.winner, "family": st["family"], "exposure_days": round(exposure_days, 2), **(report or {})})
     return out
 
 
@@ -267,7 +312,9 @@ def _daily_look(ctx: PlanContext, st: dict, wid: str, dim: str, wf: Mapping, cfg
     if start is None or not active:
         return
     days = (ctx.now - start) / DAY
-    main = _scope_look(ctx, st, wid, dim, wf, "all", settings.EXP_ALPHA_WORKFLOW, _arm_cells(ctx, st, wid, dim), active, days, start)
+    report = {"interactions": exp_interactions.safe_table(ctx.store, wid, start, ctx.now)}  # report-only, never read below
+    main = _scope_look(ctx, st, wid, dim, wf, "all", settings.EXP_ALPHA_WORKFLOW, _arm_cells(ctx, st, wid, dim), active, days, start,
+                       report)
     winner, scope, rec, cells = main.winner, "workflow", main.records.get(main.winner or ""), None
     for g in _groups(ctx, st, wid, cfg):
         out = _scope_look(ctx, st, wid, dim, wf, g["name"], settings.EXP_ALPHA_GROUP, _arm_cells(ctx, st, wid, dim, g["cells"]),
@@ -290,7 +337,8 @@ def _daily_look(ctx: PlanContext, st: dict, wid: str, dim: str, wf: Mapping, cfg
             ctx.store.add_decision(ctx.now, "experiment_revert", f"{dim}: after the last look {reverts} have a point estimate "
                                    "below control and reverting them is not expected-harmful on the observed arm rates: "
                                    "back to control in the next bundle", wid, {"dim": dim, "arms": reverts})
-    shares = exp_alloc.next_shares(st["shares"], main.ramp, main.drop, [] if ended else st.get("untested", []))
+    shares = exp_alloc.next_shares(st["shares"], main.ramp, main.drop, [] if ended else st.get("untested", []),
+                                   st.get("incumbents") or None)
     for a in main.drop:
         st["arms"][a]["state"] = "dropped"
     st["ramped"] = sorted(set(st["ramped"]) | set(main.ramp))
@@ -447,9 +495,9 @@ def _step(ctx: PlanContext, wid: str, dim: str, wf: Mapping) -> None:
     pending_promotion = bool(st["desired"] and st["desired"]["kind"] == "experiment_promote")
     if st["phase"] == xs.PENDING:
         if ctx.now >= st["not_before"] and not st["desired"]:
-            _plan_entry(ctx, st, wid, dim)
+            _plan_entry(ctx, st, wid, dim, cfg)
     elif st["phase"] == xs.RUNNING and not pending_promotion:
-        if ctx.now % DAY >= _look_minute(wf) and st["last_look_day"] < ctx.now // DAY:
+        if ctx.now % DAY >= _look_minute(wf, exp_entry.sim_params(ctx)[0]) and st["last_look_day"] < ctx.now // DAY:
             _daily_look(ctx, st, wid, dim, wf, cfg)
         elif ctx.now - st["last_check"] >= settings.EXP_HARM_CHECK_MINUTES:
             _harm_check(ctx, st, wid, dim, wf, cfg)
@@ -463,9 +511,14 @@ def experiments_detector(ctx: PlanContext) -> None:
     if not settings.ENABLE_EXPERIMENTS:
         return
     for wid in sorted(ctx.workflows):
-        for dim in xs.DIMS:
-            if xs.eligible(ctx.workflows[wid], dim):
-                _step(ctx, wid, dim, ctx.workflows[wid])
+        try:
+            for dim in xs.DIMS:
+                if xs.eligible(ctx.workflows[wid], dim):
+                    _step(ctx, wid, dim, ctx.workflows[wid])
+        except Exception as exc:  # one workflow's failure must not starve the others
+            log.exception("experiments detector failed for %s", wid)
+            once_alert(ctx.store, ctx.now, "error", "experiments_workflow_error",
+                       f"experiments detector failed: {type(exc).__name__}: {exc}", wid)
 
 
 def _auto_limit(wf: Mapping, dim: str) -> float | None:
