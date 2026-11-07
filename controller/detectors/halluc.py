@@ -216,23 +216,35 @@ def _revert_is_clearly_better(counts: list, live_rate_lb: float | None) -> bool:
     return wilson_upper(counts[1], counts[0]) < live_rate_lb
 
 
+def _scan_known_good(ctx, wid: str, body: dict, st: Mapping, live: str, tried: set, min_pass: float) -> None:
+    """Validate (at most one) known-good prompt that is in the workflow's catalog and not yet tried."""
+    options = (ctx.workflows[wid].get("options") or {}).get("prompt_version")
+    lb = body["stats"].get("rate_lb")
+    for prompt, counts in hd.known_good_candidates(st, live, ctx.now):
+        if prompt in tried or (options is not None and prompt not in options):
+            continue
+        if any(c["prompt"] == prompt for c in body["candidates"]):
+            continue
+        if not _revert_is_clearly_better(counts, lb):
+            if prompt not in body.setdefault("rejected_reverts", []):
+                body["rejected_reverts"].append(prompt)
+            continue
+        run = _validated(ctx, wid, prompt, body, min_pass)
+        if run is not None:
+            cand = _candidate(prompt, run, "known_good")
+            cand.update({"flag_rate": round(_rate(counts), 5), "flag_n": counts[0]})
+            body["candidates"].append(cand)
+            return
+
+
 def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str, persist=None) -> None:
     """Fill ``body['candidates']`` / ``body['target']``: revert first; LLM only if none exists."""
     min_pass = _wf_min_pass(ctx.workflows[wid])
     tried = set(body["tried"])
-    if not body["candidates"] and not body["reverts_checked"]:
-        body["reverts_checked"] = True
-        lb = body["stats"].get("rate_lb")
-        for prompt, counts in hd.known_good_candidates(st, live, ctx.now):
-            if not _revert_is_clearly_better(counts, lb):
-                body.setdefault("rejected_reverts", []).append(prompt)
-                continue
-            run = _validated(ctx, wid, prompt, body, min_pass)
-            if run is not None:
-                cand = _candidate(prompt, run, "known_good")
-                cand.update({"flag_rate": round(_rate(counts), 5), "flag_n": counts[0]})
-                body["candidates"].append(cand)
-                break
+    has_untried = any(c["prompt"] not in tried and c["prompt"] != live for c in body["candidates"])
+    if not has_untried and (not body["reverts_checked"] or body.get("scanned_tried", 0) < len(tried)):
+        body["reverts_checked"], body["scanned_tried"] = True, len(tried)
+        _scan_known_good(ctx, wid, body, st, live, tried, min_pass)
     if body.get("pending_suggestions"):  # a crash left paid suggestions unvalidated: finish them, never re-pay
         _validate_suggestions(ctx, wid, body, live, min_pass)
     if not any(c["prompt"] not in tried and c["prompt"] != live for c in body["candidates"]) \
@@ -367,10 +379,31 @@ def _detect_day0(ctx, wid: str, st: dict, live: str) -> bool:
     return True
 
 
+_ABSOLUTE_KINDS = ("bad_prompt_day0", "prompt_flag_ceiling")
+
+
+def _reopen_known_bad(ctx, wid: str, st: dict, live: str) -> None:
+    """A prompt we blacklisted is live again with no incident open (e.g. closed as superseded): reopen for it."""
+    reason = st["bad"][live]["reason"]
+    base, base_prompt, source = _baseline(st, live, ctx.now)
+    counts = hd.window_counts(st, live, ctx.now)
+    if counts[0] < settings.HALLUC_MIN_CONNECTS:
+        counts = hd.total_counts(st, live)
+    if reason in _ABSOLUTE_KINDS or base is None:
+        test, base_prompt = ceiling_test(counts, _effective_ceiling(ctx.workflows[wid], base)), None
+        kind = reason if reason in _ABSOLUTE_KINDS else "prompt_flag_ceiling"
+    else:
+        test, kind = segment_test(counts, base), "prompt_flag_spike"
+        test["baseline_source"] = source
+    test = {**test, "triggered": True, "reopened": True}
+    _open(ctx, wid, st, live, base_prompt, test, kind)
+
+
 def _detect(ctx: PlanContext, wid: str, st: dict, live: str) -> None:
-    if hd.is_bad(st, live, ctx.now):
-        return
     if ctx.now - st.get("cleared", {}).get(live, -10**9) < settings.HALLUC_REOPEN_COOLDOWN_MINUTES:
+        return
+    if hd.is_bad(st, live, ctx.now):
+        _reopen_known_bad(ctx, wid, st, live)
         return
     if _detect_day0(ctx, wid, st, live):
         return
@@ -416,6 +449,9 @@ def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
     eng_ok, eng, p = True, {}, 0.0
     if base_prompt is None:  # absolute incident: the fix must sit under the governance ceiling
         flags_ok = wilson_upper(new[1], new[0], 1.645) <= _effective_ceiling(wf, _baseline(st, live, ctx.now)[0])
+        bad_counts = hd.total_counts(st, body["bad_prompt"])
+        if bad_counts[0] >= settings.HALLUC_BASELINE_MIN_CONNECTS:  # too few connects: engagement stays unchecked
+            eng_ok, eng = engagement_ok(new, bad_counts, _max_engagement_drop(wf))
     else:
         base_counts = st["base"] if (base_prompt == st["first_prompt"] and st["base_frozen"]) \
             else hd.total_counts(st, base_prompt)
@@ -423,7 +459,7 @@ def _verify(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
         p = rate_greater_test(new[1], new[0], base_counts[1], base_counts[0])
         eng_ok, eng = engagement_ok(new, base_counts, _max_engagement_drop(wf))
     info = {"prompt": live, "n": new[0], "flag_rate": round(_rate(new), 5), "p": p, "margin": round(margin, 5),
-            "flags_ok": flags_ok, "engagement_ok": eng_ok, **eng}
+            "flags_ok": flags_ok, "engagement_ok": eng_ok, "engagement_compared": bool(eng), **eng}
     significantly_worse = base_prompt is not None and p < settings.HALLUC_VERIFY_P
     if eng_ok and not flags_ok and not significantly_worse and new[0] < settings.HALLUC_VERIFY_MAX_CONNECTS:
         return  # inconclusive, not failed: keep collecting until non-inferiority is resolvable or clearly worse
@@ -444,15 +480,28 @@ def _manage(ctx: PlanContext, wid: str, inc: dict, st: dict, live: str) -> None:
     body = inc["body"]
     if live == body["bad_prompt"]:
         _recheck(ctx, wid, inc, st, live)
-        if body["target"] is None and not (body["suggested"] and body["reverts_checked"]):
+        if body["target"] is None and (not (body["suggested"] and body["reverts_checked"])
+                                       or body.get("pending_suggestions")):
             prepare_fix(ctx, wid, body, st, live, lambda: update_incident(ctx.store, inc["id"], body))
             update_incident(ctx.store, inc["id"], body)
     elif live == body["target"]:
         _verify(ctx, wid, inc, st, live)
     elif live in body["tried"]:
-        return  # a failed fix is still live: waiting for the next candidate to be applied
+        if body["target"] is None and body.get("pending_suggestions"):  # unaffordable paid suggestions: finish them
+            prepare_fix(ctx, wid, body, st, live, lambda: update_incident(ctx.store, inc["id"], body))
+            update_incident(ctx.store, inc["id"], body)
+        # else a failed fix is still live: waiting for the next candidate to be applied
     else:
         close_incident(ctx.store, inc["id"], ctx.now, f"superseded: prompt is now {live}, not {body['bad_prompt']}")
+
+
+def _evaluate(ctx: PlanContext, wid: str, live: str) -> None:
+    st = hd.update(ctx.store, wid)
+    incs = open_incidents(ctx.store, wid, KIND)
+    if incs:
+        _manage(ctx, wid, incs[0], st, live)
+    else:
+        _detect(ctx, wid, st, live)
 
 
 def halluc_detector(ctx: PlanContext) -> None:
@@ -463,13 +512,12 @@ def halluc_detector(ctx: PlanContext) -> None:
         cfg = latest_config(ctx.store, wid)
         if cfg is None:
             continue
-        live = cfg[1]["prompt_version"]
-        st = hd.update(ctx.store, wid)
-        incs = open_incidents(ctx.store, wid, KIND)
-        if incs:
-            _manage(ctx, wid, incs[0], st, live)
-        else:
-            _detect(ctx, wid, st, live)
+        try:
+            _evaluate(ctx, wid, cfg[1]["prompt_version"])
+        except Exception as exc:  # one workflow's failure must not starve the others
+            log.exception("halluc evaluation failed for %s", wid)
+            once_alert(ctx.store, ctx.now, "error", "halluc_workflow_error",
+                       f"halluc detector failed: {type(exc).__name__}: {exc}", wid)
 
 
 # ------------------------------------------------------------------ producer
