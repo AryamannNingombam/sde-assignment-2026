@@ -84,10 +84,11 @@ def target_allocation(current: Mapping[str, float], status: Mapping[str, str], h
     out: dict[str, float] = {}
     for d in suspects:  # never grow a DID that looks worse than its peers
         out[d] = min(current.get(d, 0.0), cap)
+    probing = (untested[:1] or reprobe[:1])  # ONE probing DID may gain traffic per change: harm does not stack
+    for d in reprobe:  # a re-probe stays within a quarter of the harm line; a waiting one never grows
+        out[d] = min(reprobe_cap(h_bar), cap) if d in probing else min(current.get(d, 0.0), reprobe_cap(h_bar), cap)
     if untested:
         out[untested[0]] = cap
-    for d in reprobe:  # a re-probe stays within a quarter of the harm line
-        out[d] = min(reprobe_cap(h_bar), cap)
     rest = max(1.0 - sum(out.values()), 0.0)
     for d in tested:
         out[d] = rest / len(tested)
@@ -140,7 +141,7 @@ def evacuation_impact(moves, deficits: Mapping[str, float]) -> float:
 
 def expected_health(ev, alloc: Mapping[str, float], quality: Mapping[str, float]) -> float:
     """Expected traffic-weighted pickup health of ``alloc``: per-DID observed pickup ratio at comparable load
-    (``quality``, 1 when unknown) times the fatigue-curve health at the load the DID would carry."""
+    (``quality``; an unknown DID gets the conservative prior ``DID_H_FLOOR``, as the probe cap assumes) times the fatigue-curve health at the load the DID would carry."""
     total = sum(alloc.values()) or 1.0
     load = sum(ev.loads_now.values())
-    return sum((a / total) * quality.get(d, 1.0) * ev.curve.h(load * a / total) for d, a in alloc.items())
+    return sum((a / total) * quality.get(d, settings.DID_H_FLOOR) * ev.curve.h(load * a / total) for d, a in alloc.items())

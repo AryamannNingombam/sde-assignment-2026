@@ -25,6 +25,7 @@ from .fatigue_curve import FatigueCurve, fit_curve
 
 log = logging.getLogger(__name__)
 DETECTOR = "did"
+GUARD_TOLERANCE = settings.DID_PROBE_BASE_STEP  # a non-safety move may cost at most this much expected DID health (0.5pp margin to the -2% line)
 MEMO: dict[tuple[str, str], tuple[int, did_eval.Evaluation, dict]] = {}
 
 
@@ -278,10 +279,13 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
             continue
         target = did_plan.target_allocation(cur, status, h_bar(ev, cur))
         step = did_plan.plan_step(cur, target, limit, status)
-        if not _rebalance_not_harmful(ev, st, cfg[1], cur, step):
+        if limit is not None and _stalled_evacuation(cur, step, st):
+            limit, step = None, did_plan.plan_step(cur, target, None, status)  # a tiny max_shift must not strand a flagged DID: approval
+        if not _move_not_harmful(ctx, wid, key, ev, st, status, cfg[1], cur, step):
             continue
         floor = settings.DID_MIN_TV if limit is not None else settings.DID_MIN_TV_APPROVAL
-        if did_plan.tv(cur, step) < floor and not (set(step) - set(cur)):  # a new DID is always worth it
+        evacuating = any(cur.get(d, 0.0) > 1e-9 and step.get(d, 0.0) < cur.get(d, 0.0) for d in st["flagged"])
+        if did_plan.tv(cur, step) < floor and not (set(step) - set(cur)) and not evacuating:  # a new DID / a flagged DID is always worth it
             continue
         patch.setdefault("allocations", {}).setdefault(key, {})["caller_id"] = step
         moves.append((dict(cur), dict(step)))
@@ -289,6 +293,12 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
                                             for d in sorted(set(cur) | set(step))))
     out = [_change(wid, patch, status, st, ev, notes, limit, cfg[1], moves)] if patch else []
     return out + ([_owned_change(wid, owned, st)] if owned else [])
+
+
+def _stalled_evacuation(cur: Mapping, step: Mapping, st: Mapping) -> bool:
+    """A flagged DID still holds share but the auto-bounded step is too small to be applied (below the auto floor)."""
+    holds = any(cur.get(d, 0.0) > 1e-9 for d in st["flagged"])
+    return holds and did_plan.tv(cur, step) < settings.DID_MIN_TV
 
 
 def _hold_owned(ctx: PlanContext, wid: str, key: str, cur: Mapping, sup: Mapping, status: Mapping, st: Mapping) -> dict | None:
@@ -326,19 +336,49 @@ def _owned_change(wid: str, owned: list, st: Mapping) -> DesiredChange:
     return DesiredChange(wid, "did_evacuation", Priority.INCIDENT, patch, ROUTE_APPROVAL, evidence, summary)
 
 
-def _rebalance_not_harmful(ev, st, cfg: Mapping, cur: Mapping, step: Mapping) -> bool:
-    """A weak-base rebalance (no flagged DID involved) must be expected not to lower DID health.
+def _quality(ev, st, status: Mapping | None, dids) -> dict[str, float]:
+    """Observed pickup ratio per DID; a DID with no comparison is 1.0 if already tested, else the conservative prior."""
+    out = {}
+    for d in dids:
+        if d in ev.peers:
+            out[d] = ev.peers[d].q
+        elif d in st["tested"] or (status or {}).get(d) == TESTED:
+            out[d] = 1.0
+        else:
+            out[d] = settings.DID_H_FLOOR
+    return out
+
+
+def _rebalance_not_harmful(ev, st, cfg: Mapping, cur: Mapping, step: Mapping, status: Mapping | None = None) -> bool:
+    """Every non-safety move (spread, ramp after a probe, weak rebalance) must be expected not to lower DID health.
 
     Expected health uses each DID's OBSERVED pickup ratio at comparable load and the fatigue curve at the load it
     would carry after the move; a verdict that came from noise cannot justify moving load onto busier numbers.
+    A weak-base rebalance must gain; any other move may cost at most ``GUARD_TOLERANCE`` (the probe budget).
+    Safety evacuation of a flagged DID is exempt: its pickup drop is measured, not assumed.
     """
     if any(_config_share(cfg, d) > 1e-9 for d in st["flagged"]):
-        return True  # incident evacuation: the pickup drop is measured, not assumed
-    if not any(cur.get(d, 0.0) > 1e-9 for d in st["weak"]):
         return True
-    quality = {d: r.q for d, r in ev.peers.items()}
+    quality = _quality(ev, st, status, set(cur) | set(step))
     gain = did_plan.expected_health(ev, step, quality) - did_plan.expected_health(ev, cur, quality)
-    return gain >= settings.DID_REBALANCE_MIN_HEALTH_GAIN - 1e-12
+    if any(cur.get(d, 0.0) > 1e-9 for d in st["weak"]):
+        return gain >= settings.DID_REBALANCE_MIN_HEALTH_GAIN - 1e-12
+    return gain >= -GUARD_TOLERANCE - 1e-9
+
+
+def _move_not_harmful(ctx, wid: str, key: str, ev, st, status, cfg: Mapping, cur: Mapping, step: Mapping) -> bool:
+    if _rebalance_not_harmful(ev, st, cfg, cur, step, status):
+        return True
+    if note_once(ctx.store, f"did_guard:{wid}:{key}", ctx.now):
+        quality = _quality(ev, st, status, set(cur) | set(step))
+        gain = did_plan.expected_health(ev, step, quality) - did_plan.expected_health(ev, cur, quality)
+        moved = ", ".join(f"{d} {cur.get(d, 0):.1%}->{step.get(d, 0):.1%}" for d in sorted(set(cur) | set(step)))
+        ctx.store.add_decision(ctx.now, "did_move_blocked",
+                               f"not proposing the '{key}' caller-ID move ({moved}): expected DID health would change by "
+                               f"{gain:+.1%} (limit -{GUARD_TOLERANCE:.1%}; weak rebalances must gain)", wid,
+                               {"key": key, "current": dict(cur), "step": dict(step), "expected_gain": round(gain, 4),
+                                "quality": {d: round(q, 3) for d, q in quality.items()}})
+    return False
 
 
 def _change(wid, patch, status, st, ev, notes, limit, cfg, moves=()) -> DesiredChange:
