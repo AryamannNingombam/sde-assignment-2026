@@ -88,16 +88,20 @@ def cusum(blocks: Sequence[Block], reference: Block | None = None) -> dict:
     ref = reference or (sum(b[0] for b in blocks[:k_ref]), sum(b[1] for b in blocks[:k_ref]),
                         sum(b[2] for b in blocks[:k_ref]), sum(b[3] for b in blocks[:k_ref]))
     e0 = ref[2]
+    if e0 <= 0:  # a zero reference expectation has no ratio to track: no alarm
+        return out
     se0 = math.sqrt(ref[3]) / e0
     r0 = ref[1] / e0
     s, first_alarm = 0.0, None
     for i, (_, x, e, v) in enumerate(blocks[k_ref:], start=k_ref):
+        if e <= 0:
+            continue
         r, se = x / e, math.sqrt(v) / e
         z = (r0 - r) / math.sqrt(se0 ** 2 + se ** 2)
         s = max(0.0, s + z - settings.EXP_CUSUM_K)
         if s >= settings.EXP_CUSUM_H and first_alarm is None:
             first_alarm = i
-    out.update(S=round(s, 3), ref_ratio=round(r0, 4), last_ratio=round(blocks[-1][1] / blocks[-1][2], 4),
+    out.update(S=round(s, 3), ref_ratio=round(r0, 4), last_ratio=round(blocks[-1][1] / blocks[-1][2], 4) if blocks[-1][2] > 0 else None,
                alarm=s >= settings.EXP_CUSUM_H, first_alarm_block=first_alarm)
     return out
 

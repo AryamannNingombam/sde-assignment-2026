@@ -21,6 +21,9 @@ def _cell_filter(cells: Sequence[int] | None) -> tuple[str, list]:
         return "", []
     if not cells:
         return " AND 0", []
+    if all(c < 0 for c in cells):  # negative codes (-1 - cell) mean "every cell EXCEPT these" (overridden cohorts)
+        return (f" AND NOT EXISTS (SELECT 1 FROM leads l WHERE l.lid=calls.lid AND l.cell IN ({','.join('?' * len(cells))}))",
+                [-1 - c for c in cells])
     # EXISTS = one primary-key probe per call row; the old ``lid IN (SELECT lid FROM leads WHERE cell IN ..)`` scanned
     # every lead of every workflow (about 1.5 s per query at 2.3M leads) and dominated the end-of-day look
     return (f" AND EXISTS (SELECT 1 FROM leads l WHERE l.lid=calls.lid AND l.cell IN ({','.join('?' * len(cells))}))",
@@ -73,8 +76,9 @@ def _day_counts(store: Store, wid: str, col: str, day: int, cells: Sequence[int]
         data = json.loads(row[0])
         return data["e"], data["p"]
     eng, pick = _scan(store, wid, col, "day=?", [day], day * DAY, cf, cargs)
-    store.conn.execute("INSERT OR REPLACE INTO exp_day_cache(workflow_id, day, col, cells, payload) VALUES (?,?,?,?,?)",
-                       (wid, day, col, key, json.dumps({"e": eng, "p": pick})))
+    if not getattr(store, "readonly", False):  # the view/UI connection is read-only: compute, do not cache
+        store.conn.execute("INSERT OR REPLACE INTO exp_day_cache(workflow_id, day, col, cells, payload) VALUES (?,?,?,?,?)",
+                           (wid, day, col, key, json.dumps({"e": eng, "p": pick})))
     return eng, pick
 
 

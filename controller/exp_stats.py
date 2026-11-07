@@ -107,7 +107,7 @@ def contrast_strata(strata: Sequence[tuple[Rows, Rows]]) -> Contrast | None:
         for lid, (n_i, x_i) in ctl.items():
             psi[lid] = psi.get(lid, 0.0) - w / n_c * (x_i - p_c * n_i) / big_c
     g = len(psi)
-    sq = sum(v * v for v in psi.values()) * (g / (g - 1) if g > 1 else 1.0)
+    sq = sum(psi[lid] ** 2 for lid in sorted(psi)) * (g / (g - 1) if g > 1 else 1.0)
     se = math.sqrt(sq)
     tot_w = sum(p[6] for p in parts)
     effect = math.log(big_a / big_c)

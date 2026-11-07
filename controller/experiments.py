@@ -28,9 +28,18 @@ log = logging.getLogger(__name__)
 DAY = settings.MINUTES_PER_DAY
 
 
+UNMIRRORED_GRACE_MINUTES = 120  # a config version whose body is not mirrored yet blocks the watch for this long
+
+
 def _auto_ok(wf: Mapping, dim: str) -> bool:
+    """Auto-apply needs the policy on, the dim allowed and a positive max_shift (0 or missing leaves no step to take)."""
     pol = wf["governance"]["auto_apply"]
-    return bool(pol.get("enabled")) and dim in pol.get("allowed_dims", [])
+    return bool(pol.get("enabled")) and dim in pol.get("allowed_dims", []) and float(pol.get("max_shift") or 0) > 0
+
+
+def _look_minute(wf: Mapping) -> int:
+    """Minute of the day from which the daily look runs: the window end, or the day's last tick when it ends at 24."""
+    return min(wf["dialling_window"][1] * 60, DAY - settings.TICK_MINUTES)
 
 
 def _guard(wf: Mapping) -> float:
@@ -48,7 +57,7 @@ def _new_state(wf: Mapping, dim: str, cfg: tuple[int, dict], excluded=(), note: 
     live = xs.live_dist(cfg[1], dim)
     return {"phase": xs.PENDING, "control": xs.top_option(live), "options": list(wf["options"][dim]),
             "excluded": sorted(excluded), "note": note, "not_before": not_before, "shares": {}, "arms": {},
-            "family": [], "desired": None, "live": live, "seen_version": cfg[0], "start_minute": None,
+            "family": [], "desired": None, "live": live, "live_cohorts": xs.cohort_overrides(cfg[1], dim), "seen_version": cfg[0], "start_minute": None,
             "scopes": {"all": {"arm_t": {}, "looks": 0}}, "ramped": [], "groups": None, "last_look_day": -1, "data_since": 0,
             "last_check": -10 ** 9, "history": []}
 
@@ -110,7 +119,7 @@ def _below_new_control(ctx: PlanContext, st: dict, wid: str, dim: str, new_contr
     """
     if st["start_minute"] is None:
         return []
-    data = exp_data.load_arms(ctx.store, wid, dim, st["start_minute"], ctx.now)
+    data = exp_data.load_arms(ctx.store, wid, dim, st["start_minute"], ctx.now, _arm_cells(ctx, st, wid, dim))
     ctl = data.get(new_control)
     out = []
     for arm in st["options"]:
@@ -148,12 +157,20 @@ def _watch(ctx: PlanContext, st: dict, wid: str, dim: str, cfg: tuple[int, dict]
                                   " AND version>? ORDER BY version", (wid, st["seen_version"])).fetchall()
     for version, actor, ts, body in rows:
         if not body:
+            if ts is not None and ctx.now - ts < UNMIRRORED_GRACE_MINUTES:
+                break  # mirrored soon: do not look past it, a supervisor edit may hide in it
+            ctx.store.add_decision(ctx.now, "experiment_watch_skipped", f"{dim}: config v{version} has no mirrored body "
+                                   f"after {UNMIRRORED_GRACE_MINUTES} min; it cannot be examined for a supervisor edit", wid,
+                                   {"dim": dim, "version": version})
+            st["seen_version"] = version
             continue
-        dist = xs.live_dist(json.loads(body), dim)
+        body_cfg = json.loads(body)
+        dist, over = xs.live_dist(body_cfg, dim), xs.cohort_overrides(body_cfg, dim)
         exposed = st["phase"] in (xs.RUNNING, xs.PROMOTED)
-        if actor == "supervisor" and exposed and not xs.same_dist(dist, st["live"]):
+        edited = not xs.same_dist(dist, st["live"]) or not xs.same_overrides(over, st.get("live_cohorts") or {})
+        if actor == "supervisor" and exposed and edited:
             return _interrupt(ctx, st, wid, dim, cfg, version, ts if ts is not None else ctx.now, dist)
-        st["live"], st["seen_version"] = dist, version
+        st["live"], st["live_cohorts"], st["seen_version"] = dist, over, version
     live_dist = xs.live_dist(cfg[1], dim)
     if st["desired"] and xs.desired_matches(cfg[1], dim, st["desired"]):
         _on_applied(ctx, st, wid, dim, _version_row(ctx.store, wid, cfg[0])[1] or ctx.now)
@@ -185,13 +202,38 @@ def _groups(ctx: PlanContext, st: dict, wid: str, cfg: tuple[int, dict]) -> list
     if st["groups"] is None or st["groups"].get("sig") != sig:
         vocab = FeatureVocab.load(ctx.store.get_meta(VOCAB_META_KEY))
         groups = xs.analysis_groups(ctx.store, vocab, wid, cfg[1].get("cohorts") or [], ctx.now)
+        old = {g["name"]: g for g in (st["groups"] or {}).get("groups", [])}
         st["groups"] = {"sig": sig, "groups": groups}
         for g in groups:
+            before = old.get(g["name"])
+            if before is not None and (before["cohorts"], before["cells"]) != (g["cohorts"], g["cells"]):
+                st["scopes"].pop(g["name"], None)  # a redefined group is a new scope: no inherited looks / arm_t
             st["scopes"].setdefault(g["name"], {"arm_t": {}, "looks": 0})
         ctx.store.add_decision(ctx.now, "experiment_groups", f"pre-registered analysis groups: "
                                f"{[(g['name'], g['cohorts'], g['share']) for g in groups] or 'none'}", wid,
                                {"groups": [{k: v for k, v in g.items() if k != "cells"} for g in groups]})
     return st["groups"]["groups"]
+
+
+def _arm_cells(ctx: PlanContext, st: dict, wid: str, dim: str, base=None):
+    """Cell filter for the arm contrast: cells of cohorts with their OWN allocation for the dim are not served by the
+    experiment's default split (control-only calls would confound control), so they are left out.
+
+    Encoded for ``exp_data``: ``None`` (all cells) becomes negative codes ``-1 - cell`` ("all but these"); an explicit
+    cell list (analysis group) just loses those cells.
+    """
+    cfg = latest_config(ctx.store, wid)
+    if cfg is None or not xs.cohort_overrides(cfg[1], dim):
+        return base
+    key = xs.cohort_signature(cfg[1].get("cohorts") or []) + json.dumps(sorted(xs.cohort_overrides(cfg[1], dim)))
+    cache = st.get("override_cells")
+    if not cache or cache["key"] != key:
+        vocab = FeatureVocab.load(ctx.store.get_meta(VOCAB_META_KEY))
+        cache = st["override_cells"] = {"key": key, "cells": xs.override_cells(ctx.store, vocab, wid, cfg[1], dim)}
+    excluded = set(cache["cells"])
+    if not excluded:
+        return base
+    return [-1 - c for c in sorted(excluded)] if base is None else sorted(set(base) - excluded)
 
 
 def _start(ctx: PlanContext, st: dict, wid: str, dim: str) -> int | None:
@@ -225,10 +267,11 @@ def _daily_look(ctx: PlanContext, st: dict, wid: str, dim: str, wf: Mapping, cfg
     if start is None or not active:
         return
     days = (ctx.now - start) / DAY
-    main = _scope_look(ctx, st, wid, dim, wf, "all", settings.EXP_ALPHA_WORKFLOW, None, active, days, start)
+    main = _scope_look(ctx, st, wid, dim, wf, "all", settings.EXP_ALPHA_WORKFLOW, _arm_cells(ctx, st, wid, dim), active, days, start)
     winner, scope, rec, cells = main.winner, "workflow", main.records.get(main.winner or ""), None
     for g in _groups(ctx, st, wid, cfg):
-        out = _scope_look(ctx, st, wid, dim, wf, g["name"], settings.EXP_ALPHA_GROUP, g["cells"], active, days, start)
+        out = _scope_look(ctx, st, wid, dim, wf, g["name"], settings.EXP_ALPHA_GROUP, _arm_cells(ctx, st, wid, dim, g["cells"]),
+                          active, days, start)
         if winner is None and out.winner:
             winner, scope, rec, cells = out.winner, f"analysis group {g['name']} ({'+'.join(g['cohorts'])})", out.records[out.winner], g
     if winner:
@@ -295,18 +338,28 @@ def _promote(ctx, st, wid, dim, winner, scope, rec, group, snap) -> None:
     ctx.store.add_decision(ctx.now, "experiment_promote", summary, wid, {"dim": dim, "record": rec, "scope": scope, "stage": 1})
 
 
-def _harm_check(ctx, st, wid, dim, wf) -> None:
+def _harm_check(ctx, st, wid, dim, wf, cfg) -> None:
+    """Severe harm-stop. Its weights are the LIVE split minus the stopped arms (their share to control): ``st["shares"]``
+    may already hold a planned, not-yet-approved ramp, and a harm-stop (possibly auto-applied) must not carry it live."""
     start = _start(ctx, st, wid, dim)
     st["last_check"] = ctx.now
     active = sorted(a for a, v in st["arms"].items() if v["state"] == "active")
     if start is None or not active:
         return
-    data = exp_data.load_arms(ctx.store, wid, dim, start, ctx.now)
-    stops = {a: m for a, m in er.harm_stops(er.summarise(data, st["control"], active)).items() if m == "now"}
+    data = exp_data.load_arms(ctx.store, wid, dim, start, ctx.now, _arm_cells(ctx, st, wid, dim))
+    rows = er.summarise(data, st["control"], active)
+    stops = {a: m for a, m in er.harm_stops(rows).items() if m == "now"}
     if not stops:
         return
-    rows = er.summarise(data, st["control"], active)
-    shares = {a: s for a, s in st["shares"].items() if a not in stops}
+    pending = st["desired"]
+    if pending and pending["kind"] == "experiment_update" and pending.get("prev"):
+        for k in ("arms", "ramped", "untested", "family"):  # the planned update is superseded by the harm-stop
+            st[k] = json.loads(json.dumps(pending["prev"][k]))
+        ctx.store.add_decision(ctx.now, "experiment_update_superseded", f"{dim}: the pending (unapproved) update is superseded "
+                               "by a harm-stop; the next daily look re-plans from the live split", wid,
+                               {"dim": dim, "weights": pending["weights"]})
+    live = xs.live_dist(cfg[1], dim)
+    shares = {a: round(w, 6) for a, w in live.items() if a != st["control"] and a not in stops and w > xs.TOL}
     for a in stops:
         st["arms"][a]["state"] = "harm_stopped"
     st["shares"] = shares
@@ -396,10 +449,10 @@ def _step(ctx: PlanContext, wid: str, dim: str, wf: Mapping) -> None:
         if ctx.now >= st["not_before"] and not st["desired"]:
             _plan_entry(ctx, st, wid, dim)
     elif st["phase"] == xs.RUNNING and not pending_promotion:
-        if ctx.now % DAY >= wf["dialling_window"][1] * 60 and st["last_look_day"] < ctx.now // DAY:
+        if ctx.now % DAY >= _look_minute(wf) and st["last_look_day"] < ctx.now // DAY:
             _daily_look(ctx, st, wid, dim, wf, cfg)
         elif ctx.now - st["last_check"] >= settings.EXP_HARM_CHECK_MINUTES:
-            _harm_check(ctx, st, wid, dim, wf)
+            _harm_check(ctx, st, wid, dim, wf, cfg)
     elif st["phase"] == xs.PROMOTED and ctx.now - st["last_check"] >= settings.EXP_HARM_CHECK_MINUTES:
         _decay_check(ctx, st, wid, dim)
     if json.dumps(st, sort_keys=True) != before:
@@ -417,7 +470,7 @@ def experiments_detector(ctx: PlanContext) -> None:
 
 def _auto_limit(wf: Mapping, dim: str) -> float | None:
     pol = wf["governance"]["auto_apply"]
-    return float(pol.get("max_shift", 0)) if pol.get("enabled") and dim in pol.get("allowed_dims", []) else None
+    return float(pol["max_shift"]) if _auto_ok({"governance": {"auto_apply": pol}}, dim) else None
 
 
 def stepped_patch(cfg: Mapping, dim: str, desired: Mapping, limit: float | None) -> dict:
@@ -435,6 +488,16 @@ def stepped_patch(cfg: Mapping, dim: str, desired: Mapping, limit: float | None)
     return patch
 
 
+def _negligible_step(cfg: Mapping, dim: str, full: Mapping, step: Mapping) -> bool:
+    """True when the auto-bounded step moves less than DID_MIN_TV although the target is further away."""
+    moved = remaining = 0.0
+    for key, alloc in full["allocations"].items():
+        cur = xs.live_dist(cfg, dim, key)
+        moved = max(moved, did_plan.tv(cur, step["allocations"][key][dim]))
+        remaining = max(remaining, did_plan.tv(cur, alloc[dim]))
+    return moved < settings.DID_MIN_TV and remaining > moved + 1e-9
+
+
 def experiments_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
     if not settings.ENABLE_EXPERIMENTS:
         return []
@@ -450,7 +513,13 @@ def experiments_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         evidence = {"rationale": d["rationale"], "dry_run_extra": {"experiment": {"dim": dim, "kind": d["kind"], **d["evidence"]}}}
         if d["impact"] is not None:
             evidence["impact_override"] = d["impact"]
-        patch = stepped_patch(cfg[1], dim, d, _auto_limit(wf, dim)) if auto and cfg else xs.desired_patch(dim, d)
+        patch = xs.desired_patch(dim, d)
+        if auto and cfg:
+            step = stepped_patch(cfg[1], dim, d, _auto_limit(wf, dim))
+            if _negligible_step(cfg[1], dim, patch, step):  # the bounded step would barely move: ask for the whole change
+                auto = False
+            else:
+                patch = step
         out.append(DesiredChange(wid, d["kind"], Priority.SEVERE if d["severe"] else Priority.ROUTINE,
                                  patch, ROUTE_AUTO if auto else ROUTE_APPROVAL, evidence, d["summary"]))
     return out
@@ -482,7 +551,7 @@ def _veto_update(ctx, st, wid, dim, d) -> str | None:
     ramp, drop = ev.get("ramp") or [], ev.get("drop") or []
     if not (ramp or drop) or st.get("start_minute") is None:
         return None
-    data = exp_data.load_arms(ctx.store, wid, dim, st["start_minute"], ctx.now)
+    data = exp_data.load_arms(ctx.store, wid, dim, st["start_minute"], ctx.now, _arm_cells(ctx, st, wid, dim))
     rows = er.summarise(data, st["control"], list(ramp) + list(drop))
     bad = []
     for a in ramp:

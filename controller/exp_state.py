@@ -43,6 +43,15 @@ def live_dist(cfg: Mapping, dim: str, cohort: str = "default") -> dict[str, floa
     return dict((allocs.get(cohort) or {}).get(dim) or allocs["default"][dim])
 
 
+def cohort_overrides(cfg: Mapping, dim: str) -> dict[str, dict[str, float]]:
+    """Cohorts that carry their own allocation for ``dim`` (their calls are not served by the default split)."""
+    return {cid: dict(a[dim]) for cid, a in (cfg.get("allocations") or {}).items() if cid != "default" and (a or {}).get(dim)}
+
+
+def same_overrides(a: Mapping[str, Mapping[str, float]], b: Mapping[str, Mapping[str, float]]) -> bool:
+    return set(a) == set(b) and all(same_dist(a[c], b[c]) for c in a)
+
+
 def top_option(dist: Mapping[str, float]) -> str:
     """The production option: max weight, ties broken by option id (deterministic)."""
     return max(sorted(dist), key=lambda o: dist[o])
@@ -102,6 +111,15 @@ def analysis_groups(store, vocab: FeatureVocab, wid: str, cohorts: list, now: in
         out.append({"name": name, "cohorts": ids, "cells": sorted(c for i in ids for c in by_cohort.get(i, [])),
                     "share": round(sum(share[i] for i in ids), 4)})
     return out
+
+
+def override_cells(store, vocab: FeatureVocab, wid: str, cfg: Mapping, dim: str) -> list[int]:
+    """Cells served by a cohort that has its own allocation for ``dim`` (first-match cohort assignment)."""
+    over = cohort_overrides(cfg, dim)
+    if not over:
+        return []
+    by_cohort = cells_by_cohort(store, vocab, wid, [c for c in cfg.get("cohorts") or [] if c.get("where")])
+    return sorted(c for cid in over for c in by_cohort.get(cid, []))
 
 
 def cohort_signature(cohorts: list) -> str:
