@@ -18,7 +18,7 @@ from ..stats import p_text
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from ..incidents import close_incident, open_incident, open_incidents
 from . import did_data, did_eval, did_plan, did_solo
-from .common import latest_config, load_state, note_once, save_state
+from .common import latest_config, load_state, note_once, once_alert, save_state
 from .did_owner import clock, minimal_evacuation, supervisor_edit
 from .did_plan import BAD, FLAGGED, REPROBE, SUSPECT, TESTED, UNTESTED, WEAK
 from .fatigue_curve import FatigueCurve, fit_curve
@@ -206,26 +206,35 @@ def did_detector(ctx: PlanContext) -> None:
     if not settings.ENABLE_DID:
         return
     for wid in sorted(ctx.workflows):
-        options = ctx.workflows[wid]["options"]["caller_id"]
-        if len(options) < 2:
-            continue
-        got = _evaluate(ctx, wid)
-        if got is None:
-            continue
-        ev, st = got
-        active = sum(ev.window_dials.values()) > 0 and ctx.now % 1440 // 60 in range(*ctx.workflows[wid]["dialling_window"])
-        level = settings.DID_FLAG_P if ev.curve.fitted else settings.DID_FLAG_P_UNFITTED  # flat curve: stricter
-        flagged = did_eval.flagged_step(ev.steps, level) if active else None
-        if flagged is not None and flagged.did in st["flagged"]:
-            flagged = None
-        if active and _persisted(ctx, st, flagged):
-            _flag(ctx, wid, ev, st, flagged)
-        _mark_weak_and_tested(ctx, wid, ev, st, options)
-        _close_evacuated(ctx, wid, ev, st)
-        _expire_flags(ctx, wid, ev, st)
-        save_state(ctx.store, DETECTOR, wid, st)
-        if active:
-            _log_evaluation(ctx, wid, ev, st, options)
+        try:
+            _detect_workflow(ctx, wid)
+        except Exception as exc:  # one workflow's failure must not blind every other workflow's detection
+            log.exception("did detection failed for %s", wid)
+            once_alert(ctx.store, ctx.now, "error", "did_workflow_error",
+                       f"did detector failed: {type(exc).__name__}: {exc}", wid)
+
+
+def _detect_workflow(ctx: PlanContext, wid: str) -> None:
+    options = ctx.workflows[wid]["options"]["caller_id"]
+    if len(options) < 2:
+        return
+    got = _evaluate(ctx, wid)
+    if got is None:
+        return
+    ev, st = got
+    active = sum(ev.window_dials.values()) > 0 and ctx.now % 1440 // 60 in range(*ctx.workflows[wid]["dialling_window"])
+    level = settings.DID_FLAG_P if ev.curve.fitted else settings.DID_FLAG_P_UNFITTED  # flat curve: stricter
+    flagged = did_eval.flagged_step(ev.steps, level) if active else None
+    if flagged is not None and flagged.did in st["flagged"]:
+        flagged = None
+    if active and _persisted(ctx, st, flagged):
+        _flag(ctx, wid, ev, st, flagged)
+    _mark_weak_and_tested(ctx, wid, ev, st, options)
+    _close_evacuated(ctx, wid, ev, st)
+    _expire_flags(ctx, wid, ev, st)
+    save_state(ctx.store, DETECTOR, wid, st)
+    if active:
+        _log_evaluation(ctx, wid, ev, st, options)
 
 
 def _log_evaluation(ctx, wid: str, ev, st: dict, options) -> None:

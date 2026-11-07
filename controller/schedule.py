@@ -19,7 +19,7 @@ from typing import Mapping
 from . import cube, schedule_model as sm, settings
 from .cohorts import VOCAB_META_KEY, FeatureVocab, assign_cohort, select_partition
 from .desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
-from .detectors.common import latest_config, load_state, save_state
+from .detectors.common import latest_config, load_state, once_alert, save_state
 
 log = logging.getLogger(__name__)
 DETECTOR = "schedule"
@@ -196,7 +196,7 @@ def _detect_apply(ctx: PlanContext, wid: str, st: dict, cfg: tuple[int, dict]) -
                 or (plan or {}).get("estimate") or {})
     minute = _applied_minute(ctx.store, wid, cfg[0], ctx.now)
     st["applied"] = {"minute": minute, "version": cfg[0], "tables": live, "status": MONITORING,
-                     "estimate": estimate}
+                     "estimate": estimate, "prior_tables": _prior_tables(ctx.store, wid, cfg[0])}
     ctx.store.add_decision(ctx.now, "schedule_applied", f"per-cohort call times live since {clock(minute)}"
                            f" (config v{cfg[0]}); verifying hour-mix-adjusted pickup", wid,
                            {"version": cfg[0], "estimate": estimate})
@@ -248,21 +248,30 @@ def schedule_detector(ctx: PlanContext) -> None:
     if not settings.ENABLE_SCHEDULE:
         return
     for wid in sorted(ctx.workflows):
-        cfg = latest_config(ctx.store, wid)
-        if cfg is None or not _ready(ctx.store, wid, ctx.now):
-            continue
-        st = load_state(ctx.store, DETECTOR, wid)
-        before = json.dumps(st, sort_keys=True)
-        if st.get("partition_day") != ctx.now // DAY and not cfg[1].get("cohorts"):
-            _build_partition(ctx, wid, st)
-        _plan(ctx, wid, st, cfg)
-        _detect_apply(ctx, wid, st, cfg)
-        _verify(ctx, wid, st, cfg)
-        if st.get("applied", {}).get("status") == ROLLBACK and not _tables_of(cfg[1]):
-            st["applied"]["status"] = ROLLED_BACK
-            st["blocked_until"] = ctx.now + 3 * DAY
-        if json.dumps(st, sort_keys=True) != before:
-            save_state(ctx.store, DETECTOR, wid, st)
+        try:
+            _detect_workflow(ctx, wid)
+        except Exception as exc:  # one workflow's failure must not stop the schedule lever for the others
+            log.exception("schedule detection failed for %s", wid)
+            once_alert(ctx.store, ctx.now, "error", "schedule_workflow_error",
+                       f"schedule detector failed: {type(exc).__name__}: {exc}", wid)
+
+
+def _detect_workflow(ctx: PlanContext, wid: str) -> None:
+    cfg = latest_config(ctx.store, wid)
+    if cfg is None or not _ready(ctx.store, wid, ctx.now):
+        return
+    st = load_state(ctx.store, DETECTOR, wid)
+    before = json.dumps(st, sort_keys=True)
+    if st.get("partition_day") != ctx.now // DAY and not cfg[1].get("cohorts"):
+        _build_partition(ctx, wid, st)
+    _plan(ctx, wid, st, cfg)
+    _detect_apply(ctx, wid, st, cfg)
+    _verify(ctx, wid, st, cfg)
+    if st.get("applied", {}).get("status") == ROLLBACK and not _tables_of(cfg[1]):
+        st["applied"]["status"] = ROLLED_BACK
+        st["blocked_until"] = ctx.now + 3 * DAY
+    if json.dumps(st, sort_keys=True) != before:
+        save_state(ctx.store, DETECTOR, wid, st)
 
 
 # ------------------------------------------------------------------ producer
@@ -278,10 +287,44 @@ def _summary(plan: Mapping, bundle: bool) -> str:
             f"shift {-e['engagement_drop']:+.3f} (guardrail {plan['max_drop']}); weights only re-rank leads within an hour")
 
 
-def _owned(st: Mapping, cfg: Mapping) -> bool:
-    """Only tables we applied (or no tables) may be refreshed: a supervisor's schedule is never overwritten."""
+BUSINESS_DEFAULT_ACTOR = "business_default"
+
+
+def _tables_history(store, wid: str) -> list[tuple[int, str | None, dict]]:
+    rows = store.conn.execute("SELECT version, actor, body FROM config_versions WHERE workflow_id=? AND body IS NOT NULL"
+                              " ORDER BY version", (wid,)).fetchall()
+    return [(v, actor, _tables_of(json.loads(body))) for v, actor, body in rows if body]
+
+
+def _tables_editor(store, wid: str) -> str | None:
+    """Actor of the newest config version that changed the live hour tables (the first version's if none did)."""
+    editor, prev = None, None
+    for _, actor, tables in _tables_history(store, wid):
+        if prev is None or tables != prev:
+            editor = actor
+        prev = tables
+    return editor
+
+
+def _prior_tables(store, wid: str, version: int) -> dict:
+    """The hour tables live just before ``version`` (the baseline a rollback restores)."""
+    before = [t for v, _, t in _tables_history(store, wid) if v < version]
+    return before[-1] if before else {}
+
+
+def _owned(st: Mapping, cfg: Mapping, store=None, wid: str | None = None) -> bool:
+    """Tables we applied, no tables, or the business default's tables may be refreshed; a supervisor's schedule
+    (or anyone's change after ours) is never overwritten."""
     live = _tables_of(cfg)
-    return not live or live == (st.get("applied") or {}).get("tables")
+    if not live or live == (st.get("applied") or {}).get("tables"):
+        return True
+    return store is not None and _tables_editor(store, wid) in (None, BUSINESS_DEFAULT_ACTOR)
+
+
+def _rollback_patch(ap: Mapping) -> dict:
+    """Drop the tables we applied; where they replaced a business-default table, put that one back."""
+    prior = ap.get("prior_tables") or {}
+    return {k: prior.get(k) for k in ap["tables"]}
 
 
 def schedule_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
@@ -296,14 +339,14 @@ def schedule_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
     if ap.get("status") == ROLLBACK and _tables_of(cfg[1]) == ap.get("tables"):
         summary = "Roll back per-cohort call times: hour-mix-adjusted pickup/engagement fell beyond the guardrail"
         return [DesiredChange(wid, "schedule_rollback", Priority.SEVERE,
-                              {"hour_weights": {k: None for k in ap["tables"]}},
+                              {"hour_weights": _rollback_patch(ap)},
                               ROUTE_AUTO if _auto_ok(wf) else ROUTE_APPROVAL,
                               {"rationale": summary, "impact_override": 0.5}, summary)]
     plan = st.get("plan")
     bundle = not cfg[1].get("cohorts")
     floor = settings.SCHEDULE_BUNDLE_MIN_LIFT if bundle else settings.SCHEDULE_MIN_LIFT
     if (not plan or plan["blocked"] or plan["estimate"]["rel_lift"] < floor
-            or ctx.now < st.get("blocked_until", 0) or not _owned(st, cfg[1])):
+            or ctx.now < st.get("blocked_until", 0) or not _owned(st, cfg[1], ctx.store, wid)):
         return []
     evidence = {"rationale": _summary(plan, not cfg[1].get("cohorts")), "impact_override": _impact(plan),
                 "dry_run_extra": {"schedule_guardrail": {

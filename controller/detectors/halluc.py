@@ -21,7 +21,7 @@ from ..incidents import (can_spend, close_incident, daily_cap_ok, initial_credit
                          validations_of)
 from ..stats import non_inferior, p_text, rate_greater_test, wilson_lower, wilson_upper
 from . import halluc_data as hd
-from .common import latest_config, load_state, once_alert, save_state
+from .common import latest_config, load_state, note_once, once_alert, save_state
 
 log = logging.getLogger(__name__)
 KIND = "halluc"
@@ -237,10 +237,41 @@ def _scan_known_good(ctx, wid: str, body: dict, st: Mapping, live: str, tried: s
             return
 
 
+def _bar_unreachable(ctx: PlanContext, wid: str, body: Mapping, min_pass: float) -> bool:
+    """A full catalog pass: every catalog prompt already has a validation run below the bar and none is worth a
+    larger re-sample (so no purchase can still find a passing prompt). A prompt without a run (a new one) reopens it."""
+    options = (ctx.workflows[wid].get("options") or {}).get("prompt_version")
+    if not options or min_pass <= 0.0:
+        return False
+    revalidated = body.get("revalidated", [])
+    for prompt in options:
+        run = validation_for(ctx.store, wid, prompt)
+        if run is None or run["pass_rate"] >= min_pass:
+            return False
+        if _borderline(run, min_pass) and prompt not in revalidated:
+            return False
+    return True
+
+
+def _tick_minutes(ctx: PlanContext) -> int:
+    """The run's tick: smallest step the loop has taken (idle steps are longer); the default before any tick."""
+    row = ctx.store.conn.execute("SELECT MIN(step_minutes) FROM metrics WHERE step_minutes > 0").fetchone()
+    return int(row[0]) if row and row[0] else settings.TICK_MINUTES
+
+
 def prepare_fix(ctx: PlanContext, wid: str, body: dict, st: Mapping, live: str, persist=None) -> None:
     """Fill ``body['candidates']`` / ``body['target']``: revert first; LLM only if none exists."""
     min_pass = _wf_min_pass(ctx.workflows[wid])
     tried = set(body["tried"])
+    if not any(c["prompt"] not in tried and c["prompt"] != live for c in body["candidates"])             and _bar_unreachable(ctx, wid, body, min_pass):
+        body["target"] = None
+        if note_once(ctx.store, f"bar_unreachable:{wid}", ctx.now):
+            ctx.store.add_decision(ctx.now, "prompt_bar_unreachable",
+                                   f"every catalog prompt validated below the {min_pass:.3f} bar; no more validations"
+                                   " or suggestions are bought for this workflow", wid, {"min_pass": min_pass})
+        once_alert(ctx.store, ctx.now, "error", "prompt_bar_unreachable",
+                   f"no catalog prompt reaches the {min_pass:.3f} validation bar; incident stays open", wid)
+        return
     has_untried = any(c["prompt"] not in tried and c["prompt"] != live for c in body["candidates"])
     if not has_untried and (not body["reverts_checked"] or body.get("scanned_tried", 0) < len(tried)):
         body["reverts_checked"], body["scanned_tried"] = True, len(tried)
@@ -347,7 +378,7 @@ def _production_spike(ctx, wid: str, st: Mapping, live: str) -> tuple[dict, str 
         test = segment_test(win, base, alpha)
         test["baseline_source"] = source
     ceil = ceiling_test(win, ceiling)
-    if ctx.now % 60 < settings.TICK_MINUTES and test is not None:  # hourly audit row
+    if ctx.now % 60 < _tick_minutes(ctx) and test is not None:  # hourly audit row
         ctx.store.add_decision(ctx.now, "halluc_eval", f"{live}: flags {test['rate']:.2%} vs {test['base_rate']:.2%}"
                                f" (n={test['n']}, {p_text(test['p'])}, ceiling {ceiling:.1%})", wid,
                                {**test, "prompt": live, "ceiling": ceiling})
