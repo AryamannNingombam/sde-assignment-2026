@@ -74,7 +74,8 @@ def _when(r: dict[str, Any]) -> str:
 def _next(r: dict[str, Any]) -> str:
     p, rb, later = r["proposal"], r.get("rollback"), r.get("later") or []
     if rb:
-        txt = f"rolled back by v{rb['version']} at {rb['at']} ({rb['kind']}: {rb['reason'][:200]})"
+        txt = (f"rolled back by v{rb['version']} at {rb['at']} ({rb['kind']}, touching only {', '.join(rb['dims'])}: "
+               f"{rb['reason'][:200]})")
     elif later:
         txt = "later changes to these dims: " + "; ".join(f"v{c['version']} {c['at']} ({c['actor']} {c['kind']})"
                                                          for c in later[:3])
@@ -92,7 +93,9 @@ def header_lines(r: dict[str, Any]) -> list[str]:
     v, p = r["version"], r["proposal"]
     why = r.get("why")
     why_txt = (f"{why['kind']} at {why['at']}: {why['summary']}" if why
-               else (f"proposal rationale: {p['rationale']}" if p and p.get("rationale") else "not recorded as a decision"))
+               else (f"proposal rationale: {p['rationale']}" if p and p.get("rationale")
+                     else "a supervisor changed the config directly; the sim records no reason" if v["actor"] == "supervisor"
+                     else "not recorded as a decision"))
     dims = v["changed_dims"] if isinstance(v["changed_dims"], str) else json.dumps(v["changed_dims"])
     return [f"SUMMARY for {r['workflow']} at {r['at']} (plain English; details below)",
             f"  WHAT: v{v['version']} by {v['actor'] or 'initial'}, dims {dims}: {r.get('what', '-')}",

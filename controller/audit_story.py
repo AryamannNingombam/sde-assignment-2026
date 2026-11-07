@@ -97,6 +97,16 @@ def _numbers(inputs: Any) -> str:
     return f" [drop {t.get('drop')}, z {t.get('z')}, {p_text(t['p_drop'])}]"
 
 
+def _trigger_text(trig: dict | None, prop: dict | None) -> str:
+    """Trigger summary with its numbers; an incident row is only a headline, so the proposal's own summary
+    (which carries the flag rates, n and p) is used for it."""
+    if trig is None:
+        return (prop or {}).get("summary") or ""
+    if trig["kind"] == "incident_opened" and prop and prop.get("summary"):
+        return f"{trig['summary']}: {prop['summary']}"
+    return trig["summary"] + _numbers(trig["inputs"])
+
+
 def is_rollback(kind: str, summary: str | None, trigger: dict | None) -> bool:
     text = (summary or "").lower()
     return ("rollback" in kind or "revert" in kind
@@ -116,7 +126,7 @@ def later_changes(store, wid: str, ver: dict, limit: int = 4) -> list[dict]:
             continue
         prop = audit._proposal(store, r["proposal_id"])
         trig = trigger_row(store, wid, prop)
-        summary = ((trig["summary"] + _numbers(trig["inputs"])) if trig else (prop or {}).get("summary")) or ""
+        summary = _trigger_text(trig, prop)
         kind = prop["kind"] if prop else (r["actor"] or "unknown")
         out.append({"version": r["version"], "at": audit.fmt_minute(r["ts_minute"]), "at_minute": r["ts_minute"],
                     "actor": r["actor"], "kind": kind, "dims": sorted(theirs), "reason": summary[:_REASON_CHARS],
@@ -139,7 +149,8 @@ def attach(store, rep: dict[str, Any]) -> None:
         same = audit._decisions(store, "workflow_id=? AND kind=? AND sim_minute=? ORDER BY id LIMIT 3",
                                 (wid, trig["kind"], trig["sim_minute"]))
         rep["why"] = {"kind": trig["kind"], "at": audit.fmt_minute(trig["sim_minute"]),
-                      "summary": " | ".join(dict.fromkeys(r["summary"] for r in same))}
+                      "summary": (_trigger_text(trig, prop) if trig["kind"] == "incident_opened"
+                                  else " | ".join(dict.fromkeys(r["summary"] for r in same)))}
     rep["later"] = later_changes(store, wid, ver)
     rep["policy"] = audit.workflow_policy(store, wid)
     # Only the very next change to the same dims can undo this one, and a rollback is not itself rolled back.
