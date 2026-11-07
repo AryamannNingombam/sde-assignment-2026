@@ -1,5 +1,25 @@
 # Determinism check (R5)
 
+## Final verification (2026-11-07, commit c556fce)
+
+Two clean concurrent runs of `public_01_dev` (`scripts/det_run.sh a|b`, random `PYTHONHASHSEED`s, ports 8961/8962,
+own sim + run dir + state dir), compared with `scripts/determinism_check.py` against baseline `runs/final_base1`.
+The graded `run.sh` run (`state/final1`, run alone-ish, concurrent with public_02) was also compared with run A.
+
+```
+decisions: A=2545 B=2545 IDENTICAL sha=98bbc701d749
+proposals: A=24 B=24 IDENTICAL sha=5e9574965b43
+config_versions: A=25 B=25 IDENTICAL sha=815213388dfc
+alerts: A=3 B=3 IDENTICAL sha=ab03d5454b23
+grade --json: IDENTICAL (14139 bytes)
+RESULT: DETERMINISTIC
+```
+
+Run A vs the graded run (`state/final1`, `runs/final_mine1`): the same four shas and identical grade JSON.
+
+The sections below are the historical record of how the problem was found and fixed.
+
+
 Method: `scripts/det_run.sh` runs one clean controller run of `public_01_dev` (own simulator, own run dir, own
 state dir, no baseline reuse); two runs are started **concurrently** with random `PYTHONHASHSEED`s so CPU timing and
 hash ordering both differ. `scripts/determinism_check.py` then compares, row by row, `decisions` (sim_minute,

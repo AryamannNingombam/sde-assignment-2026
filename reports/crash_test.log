@@ -1,83 +1,91 @@
-01:24:14 crash test: scenario=scenarios/public_02_incidents.yaml url=http://127.0.0.1:55401 points=['mid-ingest-txn', 'after-submit-before-record', 'after-apply-before-record', 'after-advance-before-ingest', 'after-credit-call-before-record'] random_kills=10 seed=7 platform=win32
-01:24:21 simulator up
-01:24:21 RUN with CRASH_AT=after-credit-call-before-record:1
-01:24:28 KILL POINT after-credit-call-before-record: FIRED (os._exit)
-01:24:28 after after-credit-call-before-record:1: exit rc=137; ingest cursor now event_id=187274
-01:24:28   last proposal row: none yet
-01:24:28 RUN with CRASH_AT=after-credit-call-before-record:4
-01:24:29 KILL POINT after-credit-call-before-record: FIRED (os._exit)
-01:24:29 after after-credit-call-before-record:4: exit rc=137; ingest cursor now event_id=187274
-01:24:29   last proposal row: none yet
-01:24:29 RUN with CRASH_AT=mid-ingest-txn:3
-01:24:35 KILL POINT mid-ingest-txn: FIRED (os._exit)
-01:24:35 after mid-ingest-txn:3: exit rc=137; ingest cursor now event_id=190579
-01:24:35   last proposal row: ('ks_cancel:1:did_probe', 'did_probe', 'MONITORING', 'auto') (total proposals 2)
-01:24:35 RUN with CRASH_AT=mid-ingest-txn:30
-01:24:49 KILL POINT mid-ingest-txn: FIRED (os._exit)
-01:24:49 after mid-ingest-txn:30: exit rc=137; ingest cursor now event_id=196910
-01:24:49   last proposal row: ('ks_cancel:2:experiment_entry', 'experiment_entry', 'MONITORING', 'approval') (total proposals 5)
-01:24:49 RUN with CRASH_AT=after-submit-before-record:1
-01:24:55 KILL POINT after-submit-before-record: FIRED (os._exit)
-01:24:55 after after-submit-before-record:1: exit rc=137; ingest cursor now event_id=199835
-01:24:56   last proposal row: ('nw_renewal:3:schedule_rollback', 'schedule_rollback', 'INTENT', 'auto') (total proposals 6)
-01:24:56 RUN with CRASH_AT=after-submit-before-record:2
-01:25:17 KILL POINT after-submit-before-record: FIRED (os._exit)
-01:25:17 after after-submit-before-record:2: exit rc=137; ingest cursor now event_id=209489
-01:25:17   last proposal row: ('ks_cancel:3:did_spread', 'did_spread', 'INTENT', 'auto') (total proposals 8)
-01:25:17 RUN with CRASH_AT=after-apply-before-record:1
-01:25:56 KILL POINT after-apply-before-record: FIRED (os._exit)
-01:25:56 after after-apply-before-record:1: exit rc=137; ingest cursor now event_id=218922
-01:25:56   last proposal row: ('nw_renewal:6:experiment_update', 'experiment_update', 'PENDING', 'approval') (total proposals 12)
-01:25:56 RUN with CRASH_AT=after-apply-before-record:2
-01:26:32 KILL POINT after-apply-before-record: FIRED (os._exit)
-01:26:32 after after-apply-before-record:2: exit rc=137; ingest cursor now event_id=234883
-01:26:32   last proposal row: ('ks_cancel:8:experiment_update', 'experiment_update', 'STALE', 'approval') (total proposals 17)
-01:26:32 RUN with CRASH_AT=after-advance-before-ingest:40
-01:26:54 KILL POINT after-advance-before-ingest: FIRED (os._exit)
-01:26:54 after after-advance-before-ingest:40: exit rc=137; ingest cursor now event_id=242113
-01:26:54   last proposal row: ('nw_renewal:8:did_spread', 'did_spread', 'MONITORING', 'auto') (total proposals 19)
-01:26:54 RUN, hard kill (Popen.kill) scheduled after 4.0s wall
-01:26:58 KILL RANDOM after 4.0s
-01:26:58 after random kill: exit rc=1; ingest cursor now event_id=242113
-01:26:58 RUN, hard kill (Popen.kill) scheduled after 3.2s wall
-01:27:02 KILL RANDOM after 3.2s
-01:27:02 after random kill: exit rc=1; ingest cursor now event_id=246116
-01:27:02 RUN, hard kill (Popen.kill) scheduled after 5.4s wall
-01:27:07 KILL RANDOM after 5.4s
-01:27:07 after random kill: exit rc=1; ingest cursor now event_id=247916
-01:27:07 RUN, hard kill (Popen.kill) scheduled after 2.8s wall
-01:27:10 KILL RANDOM after 2.8s
-01:27:10 after random kill: exit rc=1; ingest cursor now event_id=249042
-01:27:10 RUN, hard kill (Popen.kill) scheduled after 4.9s wall
-01:27:15 KILL RANDOM after 4.9s
-01:27:15 after random kill: exit rc=1; ingest cursor now event_id=250842
-01:27:15 RUN, hard kill (Popen.kill) scheduled after 4.1s wall
-01:27:19 KILL RANDOM after 4.1s
-01:27:19 after random kill: exit rc=1; ingest cursor now event_id=252417
-01:27:19 RUN, hard kill (Popen.kill) scheduled after 2.8s wall
-01:27:22 KILL RANDOM after 2.8s
-01:27:22 after random kill: exit rc=1; ingest cursor now event_id=253317
-01:27:22 RUN, hard kill (Popen.kill) scheduled after 4.8s wall
-01:27:27 KILL RANDOM after 4.8s
-01:27:27 after random kill: exit rc=1; ingest cursor now event_id=255117
-01:27:27 RUN, hard kill (Popen.kill) scheduled after 2.7s wall
-01:27:29 KILL RANDOM after 2.7s
-01:27:29 after random kill: exit rc=1; ingest cursor now event_id=255817
-01:27:29 RUN, hard kill (Popen.kill) scheduled after 4.5s wall
-01:27:34 KILL RANDOM after 4.5s
-01:27:34 after random kill: exit rc=1; ingest cursor now event_id=255817
-01:27:34 RUN to completion (attempt 1)
-01:30:14 completion run: exit rc=0; ingest cursor now event_id=324345
-01:30:14 controller finished rc=0; restarts=20; wall=361s
-01:30:15 sim state: finished=True sim_minute=14400
-01:30:15 INVARIANT PASS: run completed: controller exit 0 and sim finished -- rc=0
-01:30:15 INVARIANT PASS: all 10 random kills were delivered mid-run (test validity) -- delivered=10
-01:30:15 INVARIANT PASS: every named fault point fired -- fired=9 of 9
-01:30:15 INVARIANT PASS: every controller_* config version maps to a unique proposal_id in our store (applied_version and approval_id agree) -- 24 versions checked; bad=[]
-01:30:15 INVARIANT PASS: no duplicate applies in our store -- duplicates=[]
-01:30:15 INVARIANT PASS: grade: lapsed 0, apply_conflicts 0, auto_apply_rejected 0 -- {"approval_requests": 15, "decisions": {"approved": 14, "rejected": 1, "expired": 0}, "rejection_reasons": {"approver declined (judgement call)": 1}, "applied_via_approval": 11, "auto_applied": 13, "auto_apply_rejected": 0, "apply_conflicts": 0, "lapsed": 0, "peak_requests_per_24h": {"nw_renewal": 1, "nw_kyc": 1, "ks_cancel": 2}}
-01:30:15 INVARIANT PASS: every proposal is terminal/consistent with GET /approvals; no approval lost -- 28 proposals, 15 approvals; problems=[]
-01:30:15 INVARIANT PASS: ingest cursor monotonic across restarts and == sim last_event_id at the end -- cursors=[187274, 187274, 190579, 196910, 199835, 209489, 218922, 234883, 242113, 242113, 246116, 247916, 249042, 250842, 252417, 253317, 255117, 255817, 255817, 324345] final=324345 sim=324345
-01:30:15 INVARIANT PASS: credits ledger reconciles: sum(llm_calls.credits) == initial - sim credits_remaining -- initial=200.0 sim_remaining=184.0 ledger=16.00 of which unrecorded-at-crash=5.00
-01:30:15 INVARIANT PASS: experiments were active (experiment_* proposals exist for the kills to land on) -- kinds=['did_evacuation', 'did_probe', 'did_rebalance', 'did_spread', 'experiment_conclude', 'experiment_entry', 'experiment_update', 'halluc_fix', 'schedule_refresh', 'schedule_rollback']
-01:30:15 RESULT: ALL INVARIANTS PASS
+05:38:18 crash test: scenario=scenarios/public_02_incidents.yaml url=http://127.0.0.1:62968 points=['mid-ingest-txn', 'after-submit-before-record', 'after-apply-before-record', 'after-advance-before-ingest', 'after-credit-call-before-record', 'before-apply-request'] random_kills=10 seed=7 platform=win32
+05:38:24 simulator up
+05:38:24 RUN with CRASH_AT=after-credit-call-before-record:1
+05:38:35 KILL POINT after-credit-call-before-record: FIRED (os._exit)
+05:38:35 after after-credit-call-before-record:1: exit rc=137; ingest cursor now event_id=187274
+05:38:35   last proposal row: none yet
+05:38:35 RUN with CRASH_AT=after-credit-call-before-record:4
+05:38:36 KILL POINT after-credit-call-before-record: FIRED (os._exit)
+05:38:36 after after-credit-call-before-record:4: exit rc=137; ingest cursor now event_id=187274
+05:38:36   last proposal row: none yet
+05:38:36 RUN with CRASH_AT=mid-ingest-txn:3
+05:38:45 KILL POINT mid-ingest-txn: FIRED (os._exit)
+05:38:45 after mid-ingest-txn:3: exit rc=137; ingest cursor now event_id=190579
+05:38:45   last proposal row: ('ks_cancel:1:did_probe', 'did_probe', 'MONITORING', 'auto') (total proposals 2)
+05:38:45 RUN with CRASH_AT=mid-ingest-txn:30
+05:38:59 KILL POINT mid-ingest-txn: FIRED (os._exit)
+05:38:59 after mid-ingest-txn:30: exit rc=137; ingest cursor now event_id=196910
+05:38:59   last proposal row: ('ks_cancel:2:experiment_entry', 'experiment_entry', 'MONITORING', 'approval') (total proposals 5)
+05:38:59 RUN with CRASH_AT=after-submit-before-record:1
+05:39:05 KILL POINT after-submit-before-record: FIRED (os._exit)
+05:39:05 after after-submit-before-record:1: exit rc=137; ingest cursor now event_id=199610
+05:39:05   last proposal row: ('nw_renewal:3:schedule_rollback', 'schedule_rollback', 'INTENT', 'auto') (total proposals 6)
+05:39:05 RUN with CRASH_AT=after-submit-before-record:2
+05:39:27 KILL POINT after-submit-before-record: FIRED (os._exit)
+05:39:27 after after-submit-before-record:2: exit rc=137; ingest cursor now event_id=209490
+05:39:27   last proposal row: ('ks_cancel:4:did_spread', 'did_spread', 'INTENT', 'auto') (total proposals 8)
+05:39:27 RUN with CRASH_AT=after-apply-before-record:1
+05:39:56 KILL POINT after-apply-before-record: FIRED (os._exit)
+05:39:56 after after-apply-before-record:1: exit rc=137; ingest cursor now event_id=222299
+05:39:56   last proposal row: ('ks_cancel:7:did_evacuation', 'did_evacuation', 'MONITORING', 'auto') (total proposals 13)
+05:39:56 RUN with CRASH_AT=after-apply-before-record:2
+05:40:34 KILL POINT after-apply-before-record: FIRED (os._exit)
+05:40:34 after after-apply-before-record:2: exit rc=137; ingest cursor now event_id=238934
+05:40:34   last proposal row: ('nw_renewal:7:did_spread', 'did_spread', 'MONITORING', 'auto') (total proposals 17)
+05:40:34 RUN with CRASH_AT=before-apply-request:1
+05:40:56 KILL POINT before-apply-request: FIRED (os._exit)
+05:40:56 after before-apply-request:1: exit rc=137; ingest cursor now event_id=247239
+05:40:56   last proposal row: ('ks_cancel:10:experiment_update', 'experiment_update', 'PENDING', 'approval') (total proposals 19)
+05:40:56 RUN with CRASH_AT=before-apply-request:2
+05:40:59 KILL POINT before-apply-request: FIRED (os._exit)
+05:40:59 after before-apply-request:2: exit rc=137; ingest cursor now event_id=248141
+05:40:59   last proposal row: ('ks_cancel:10:experiment_update', 'experiment_update', 'APPROVED', 'approval') (total proposals 19)
+05:40:59 RUN with CRASH_AT=after-advance-before-ingest:40
+05:41:20 KILL POINT after-advance-before-ingest: FIRED (os._exit)
+05:41:20 after after-advance-before-ingest:40: exit rc=137; ingest cursor now event_id=255818
+05:41:20   last proposal row: ('ks_cancel:11:did_probe', 'did_probe', 'MONITORING', 'auto') (total proposals 20)
+05:41:20 RUN, hard kill (Popen.kill) scheduled after 4.0s wall
+05:41:24 KILL RANDOM after 4.0s
+05:41:24 after random kill: exit rc=1; ingest cursor now event_id=255818
+05:41:24 RUN, hard kill (Popen.kill) scheduled after 3.2s wall
+05:41:28 KILL RANDOM after 3.2s
+05:41:28 after random kill: exit rc=1; ingest cursor now event_id=259296
+05:41:28 RUN, hard kill (Popen.kill) scheduled after 5.4s wall
+05:41:33 KILL RANDOM after 5.4s
+05:41:33 after random kill: exit rc=1; ingest cursor now event_id=261171
+05:41:33 RUN, hard kill (Popen.kill) scheduled after 2.8s wall
+05:41:36 KILL RANDOM after 2.8s
+05:41:36 after random kill: exit rc=1; ingest cursor now event_id=261846
+05:41:36 RUN, hard kill (Popen.kill) scheduled after 4.9s wall
+05:41:41 KILL RANDOM after 4.9s
+05:41:41 after random kill: exit rc=1; ingest cursor now event_id=263871
+05:41:41 RUN, hard kill (Popen.kill) scheduled after 4.1s wall
+05:41:45 KILL RANDOM after 4.1s
+05:41:45 after random kill: exit rc=1; ingest cursor now event_id=265222
+05:41:45 RUN, hard kill (Popen.kill) scheduled after 2.8s wall
+05:41:48 KILL RANDOM after 2.8s
+05:41:48 after random kill: exit rc=1; ingest cursor now event_id=266122
+05:41:48 RUN, hard kill (Popen.kill) scheduled after 4.8s wall
+05:41:53 KILL RANDOM after 4.8s
+05:41:53 after random kill: exit rc=1; ingest cursor now event_id=267924
+05:41:53 RUN, hard kill (Popen.kill) scheduled after 2.7s wall
+05:41:56 KILL RANDOM after 2.7s
+05:41:56 after random kill: exit rc=1; ingest cursor now event_id=268824
+05:41:56 RUN, hard kill (Popen.kill) scheduled after 4.5s wall
+05:42:00 KILL RANDOM after 4.5s
+05:42:00 after random kill: exit rc=1; ingest cursor now event_id=269524
+05:42:00 RUN to completion (attempt 1)
+05:44:12 completion run: exit rc=0; ingest cursor now event_id=324341
+05:44:12 controller finished rc=0; restarts=22; wall=355s
+05:44:13 sim state: finished=True sim_minute=14400
+05:44:13 INVARIANT PASS: run completed: controller exit 0 and sim finished -- rc=0
+05:44:13 INVARIANT PASS: all 10 random kills were delivered mid-run (test validity) -- delivered=10
+05:44:13 INVARIANT PASS: every named fault point fired -- fired=11 of 11
+05:44:13 INVARIANT PASS: every controller_* config version maps to a unique proposal_id in our store (applied_version and approval_id agree) -- 22 versions checked; bad=[]
+05:44:13 INVARIANT PASS: no duplicate applies in our store -- duplicates=[]
+05:44:13 INVARIANT PASS: grade: lapsed 0, apply_conflicts 0, auto_apply_rejected 0 -- {"approval_requests": 13, "decisions": {"approved": 13, "expired": 0}, "rejection_reasons": {}, "applied_via_approval": 11, "auto_applied": 11, "auto_apply_rejected": 0, "apply_conflicts": 0, "lapsed": 0, "peak_requests_per_24h": {"nw_kyc": 1, "nw_renewal": 1, "ks_cancel": 2}}
+05:44:13 INVARIANT PASS: every proposal is terminal/consistent with GET /approvals; no approval lost -- 24 proposals, 13 approvals; problems=[]
+05:44:13 INVARIANT PASS: ingest cursor monotonic across restarts and == sim last_event_id at the end -- cursors=[187274, 187274, 190579, 196910, 199610, 209490, 222299, 238934, 247239, 248141, 255818, 255818, 259296, 261171, 261846, 263871, 265222, 266122, 267924, 268824, 269524, 324341] final=324341 sim=324341
+05:44:13 INVARIANT PASS: credits ledger reconciles: sum(llm_calls.credits) == initial - sim credits_remaining -- initial=200.0 sim_remaining=184.0 ledger=16.00 of which unrecorded-at-crash=5.00
+05:44:13 INVARIANT PASS: experiments were active (experiment_* proposals exist for the kills to land on) -- kinds=['did_evacuation', 'did_probe', 'did_rebalance', 'did_spread', 'experiment_entry', 'experiment_update', 'halluc_fix', 'schedule_rollback']
+05:44:13 RESULT: ALL INVARIANTS PASS
