@@ -102,10 +102,31 @@ def test_budget_tiers_for_totals_1_to_4(total, routine, severe, incident):
 
 
 def test_urgent_threshold_is_a_coin_flip_not_a_long_shot():
-    """D5: an incident is filed at P >= 0.5, never at the old 0.3 (a 70% expiry that burns slot and hygiene)."""
+    """D5: where some minute of the day reaches P >= 0.5, an incident waits for such a minute."""
     assert fatigue.settings.FILE_MIN_P_URGENT == 0.5
-    gov = {**NW_RENEWAL, "proposal_ttl_hours": 2}
-    assert 0.3 < fatigue.decision_probability(at(0, 10), gov) < 0.5
-    assert not fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]
     gov = {**NW_RENEWAL, "proposal_ttl_hours": 3}
+    assert fatigue.best_daily_probability(gov) >= 0.5
     assert fatigue.filing_window_ok(at(0, 10), gov, False, "x")[0]
+
+
+@pytest.mark.parametrize("base", [NW_RENEWAL, NW_KYC])
+def test_incident_still_files_when_no_minute_of_the_day_reaches_the_urgent_bar(base):
+    """A 2 h ttl with up to 4-8 h latency: best P is 0.43 (nw_renewal) / 0.145 (nw_kyc), below 0.5.
+    Never filing guarantees the safety fix never lands, so urgent work files at the best available
+    minutes (>= 95% of the day's best, never below FILE_MIN_P_URGENT_FLOOR); routine still never files."""
+    gov = {**base, "proposal_ttl_hours": 2}
+    best = fatigue.best_daily_probability(gov)
+    assert settings.FILE_MIN_P_URGENT_FLOOR <= best < settings.FILE_MIN_P_URGENT
+    lo, hi = gov["approver_hours"]
+    minutes = range(at(1, lo), at(1, hi), 15)
+    urgent = [m for m in minutes if fatigue.filing_window_ok(m, gov, False, "x")[0]]
+    assert urgent, "an incident must be fileable at some minute"
+    assert all(fatigue.decision_probability(m, gov) >= 0.95 * best for m in urgent)
+    assert not any(fatigue.filing_window_ok(m, gov, True, "x")[0] for m in minutes)
+
+
+def test_hopeless_ttl_never_files_even_an_incident():
+    gov = {**NW_KYC, "proposal_ttl_hours": 1}  # best P ~0.002: every request would expire
+    assert fatigue.best_daily_probability(gov) < settings.FILE_MIN_P_URGENT_FLOOR
+    lo, hi = gov["approver_hours"]
+    assert not any(fatigue.filing_window_ok(m, gov, False, "x")[0] for m in range(at(1, lo), at(1, hi), 15))

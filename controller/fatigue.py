@@ -10,7 +10,8 @@
   leave no filing opportunity is ignored (``soft_cap_ignored``).
 * A request is filed only inside approver hours, and only if the probability that the decision lands
   before ``expires_at`` is high enough (``decision_probability``): routine >= FILE_MIN_P_ROUTINE,
-  urgent (incident/severe) >= FILE_MIN_P_URGENT. Latency is uniform on [lo, hi] in the sim.
+  urgent (incident/severe) >= FILE_MIN_P_URGENT, or, when no minute of the day reaches that, the day's
+  best minutes if their P >= FILE_MIN_P_URGENT_FLOOR (``urgent_need``). Latency is uniform on [lo, hi].
 """
 from __future__ import annotations
 
@@ -68,6 +69,26 @@ def decision_probability(now: int, gov: Mapping, expires_in_hours: float | None 
                      tuple(gov["approver_hours"]))
 
 
+def best_daily_probability(gov: Mapping, expires_in_hours: float | None = None) -> float:
+    """Highest decision_probability over the in-hours minutes of a day (15-minute grid)."""
+    hours = gov["approver_hours"]
+    ps = [decision_probability(m, gov, expires_in_hours) for m in range(0, DAY, 15) if in_hours(m, hours)]
+    return max(ps, default=0.0)
+
+
+def urgent_need(gov: Mapping, expires_in_hours: float | None = None) -> float:
+    """P an incident/severe request needs: FILE_MIN_P_URGENT, unless no minute of the day reaches it
+    (short ttl, long latency). Then file at the day's best minutes (>= 95% of the best P) if that best
+    is at least FILE_MIN_P_URGENT_FLOOR: a likely-expiring request costs a slot and a hygiene count,
+    but never filing guarantees the safety fix never lands."""
+    best = best_daily_probability(gov, expires_in_hours)
+    if best >= settings.FILE_MIN_P_URGENT:
+        return settings.FILE_MIN_P_URGENT
+    if best < settings.FILE_MIN_P_URGENT_FLOOR:
+        return settings.FILE_MIN_P_URGENT  # hopeless: every request would expire
+    return max(settings.FILE_MIN_P_URGENT_FLOOR, 0.95 * best)
+
+
 def soft_cap_ignored(gov: Mapping, workflow_id: str, expires_in_hours: float | None = None) -> str | None:
     """Why the workflow's soft cap cannot be honoured (``None`` = it can, or there is none)."""
     soft = settings.SOFT_CAPS.get(workflow_id)
@@ -97,7 +118,7 @@ def filing_window_ok(now: int, gov: Mapping, routine: bool, workflow_id: str,
             and now % DAY < soft["not_before_hour"] * 60
             and soft_cap_ignored(gov, workflow_id, expires_in_hours) is None):
         return False, f"soft cap: not before {soft['not_before_hour']}:00"
-    need = settings.FILE_MIN_P_ROUTINE if routine else settings.FILE_MIN_P_URGENT
+    need = settings.FILE_MIN_P_ROUTINE if routine else urgent_need(gov, expires_in_hours)
     p = decision_probability(now, gov, expires_in_hours)
     if p < need:
         return False, f"P(decision before expires_at)={p:.2f} < {need}"

@@ -55,6 +55,7 @@ SOFT_CAPS: dict[str, dict[str, int]] = {
 }
 FILE_MIN_P_ROUTINE = 0.9  # min P(decision lands before expires_at) to file a routine request
 FILE_MIN_P_URGENT = 0.5  # ... for an incident / severe (harm-stop, rollback) request: a coin-flip, not a long shot
+FILE_MIN_P_URGENT_FLOOR = 0.10  # ... unless no minute of the day reaches 0.5: then the day's best minutes, if >= this
 SUBMIT_FAILED_BACKOFF_MIN = 240  # sim minutes before the same (workflow, kind, route) is resubmitted
 AUTO_APPLY_MIN_GAP_MINUTES = 60  # A5: one auto-apply step per workflow per hour ...
 AUTO_APPLY_INCIDENT_GAP_MINUTES = 15  # ... or per tick in incident mode
