@@ -28,7 +28,7 @@
 | DB at the end (sampled while running, WAL included) | 2,018 MB; 7,433,295 `calls` rows |
 
 **Trend.** The wall time still grows with the run: Day 1 took 268 s and Day 4 took 423 s.
-- Ingest time per day rises from 130 s to 161 s as `calls` and its index grow.
+- Ingest time per day rises from 130 s on Day 1 to 156-161 s on days 3-4 as `calls` and its index grow.
 - Detector time also rises.
 - At this slope, a run several times longer would cross 600 s per day. The fix for that is the partitioning in SUBMISSION section 8.
 
