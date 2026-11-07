@@ -21,6 +21,7 @@ If the **simulator** restarts, it is a new world: the controller detects the reg
 
 * `state/<scenario>-<fingerprint8>.db` (+ `-wal`, `-shm`): the only state. WAL mode, one writer (the controller).
   The fingerprint is scenario + hash of the first history line, so a different world gets a different file.
+* **The DB file must be on a persistent volume.** It is the only copy of the `decisions` audit trail (why every change was made), detector state and the credit ledger. Re-ingesting from the simulator rebuilds calls and leads, not decisions. Back it up (copy while the controller is stopped, or use `sqlite3 .backup`).
 * `runs/`: simulator run directories and grade inputs (not controller state).
 * `reports/`: grade reports and the crash-test log.
 

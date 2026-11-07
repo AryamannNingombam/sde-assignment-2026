@@ -43,5 +43,5 @@ We built per-person call time as an analysis and deliberately did not deploy it.
 P >= 0.8 bar, the posterior is about 90% the cohort prior, and a no-signal control run through the same rule produces 75-90% as many "qualifiers" with the same apparent +40% lift,
 so the figure Product would put in a headline is mostly the winner's curse. Even taken at face value qualifying persons carry 2-6% of dials, an upper bound of +0.8% to +2.3% pickup per workflow
 before the x0.25 off-hour penalty and fixed hourly capacity (treated persons displace others' dials) cut it further, and a person-level holdout cannot measure it because treated persons displace controls. Per-cohort hour weights (C4a) deliver
-the defensible share of the call-time gain with a measurable before/after check; per-person assignment stays an auditable analysis that we re-run daily, and we would revisit it only with much more history per person
+the defensible share of the call-time gain with a measurable before/after check; per-person assignment stays an auditable analysis that is run on demand (`python -m controller person-analysis`; the daily job is wired into the tick but the flag `ENABLE_PERSON_ANALYSIS` is off), and we would revisit it only with much more history per person
 or a per-person hour mechanism that does not compete for capacity.
