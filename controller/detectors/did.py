@@ -14,6 +14,7 @@ from typing import Mapping
 
 from .. import settings
 from ..configlib import dist
+from ..stats import p_text
 from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, ROUTE_AUTO, DesiredChange, PlanContext, Priority
 from ..incidents import close_incident, open_incident, open_incidents
 from . import did_data, did_eval, did_plan, did_solo
@@ -112,7 +113,7 @@ def _flag(ctx: PlanContext, wid: str, ev, st: dict, step: did_eval.StepResult) -
     open_incident(ctx.store, wid, "did_flagged", ctx.now,
                   {"did": step.did, "step": step.as_dict(), "q_est": round(q_est, 4)})
     ref = "its own history (hour/cell/fatigue adjusted)" if step.solo else "peers"
-    msg = (f"FLAGGED {step.did}: pickup ratio vs {ref} fell {step.test.drop:.0%} (p={step.test.p:.1e}, "
+    msg = (f"FLAGGED {step.did}: pickup ratio vs {ref} fell {step.test.drop:.0%} ({p_text(step.test.p)}, "
            f"{step.n_window} dials in {step.window_hours}h vs {step.n_ref} in the reference); incident mode")
     ctx.store.add_decision(ctx.now, "did_flagged", msg, wid, {"step": step.as_dict(),
                                                               "curve": ev.curve.params()})
@@ -265,6 +266,7 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
     limit = _auto_limit(wf)
     patch: dict = {}
     notes: list[str] = []
+    moves: list[tuple[dict, dict]] = []  # (current, step) per allocation key, for the safety impact
     owned: list[tuple[str, dict, dict, dict]] = []  # (key, supervisor edit, current, evacuation step)
     for key in _keys(cfg[1]):
         cur = dist(cfg[1], key, "caller_id")
@@ -282,9 +284,10 @@ def did_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         if did_plan.tv(cur, step) < floor and not (set(step) - set(cur)):  # a new DID is always worth it
             continue
         patch.setdefault("allocations", {}).setdefault(key, {})["caller_id"] = step
+        moves.append((dict(cur), dict(step)))
         notes.append(f"{key}: " + ", ".join(f"{d} {cur.get(d, 0):.1%}->{step.get(d, 0):.1%}"
                                             for d in sorted(set(cur) | set(step))))
-    out = [_change(wid, patch, status, st, ev, notes, limit, cfg[1])] if patch else []
+    out = [_change(wid, patch, status, st, ev, notes, limit, cfg[1], moves)] if patch else []
     return out + ([_owned_change(wid, owned, st)] if owned else [])
 
 
@@ -317,7 +320,9 @@ def _owned_change(wid: str, owned: list, st: Mapping) -> DesiredChange:
                      " so only the flagged number is removed and the rest of their split is kept proportionally")
     summary = "Safety evacuation of a flagged caller ID from a supervisor-set allocation (needs approval): " + " | ".join(parts)
     first = next(iter(edits.values()))
-    evidence = {"rationale": summary, "flag_evacuation": True, "supervisor_edit": first, "supervisor_edits": edits}
+    deficits = {d: 1.0 - f["q_est"] for d, f in st["flagged"].items()}
+    evidence = {"rationale": summary, "flag_evacuation": True, "supervisor_edit": first, "supervisor_edits": edits,
+                "impact_override": did_plan.evacuation_impact([(c, s) for _, _, c, s in owned], deficits)}
     return DesiredChange(wid, "did_evacuation", Priority.INCIDENT, patch, ROUTE_APPROVAL, evidence, summary)
 
 
@@ -336,7 +341,7 @@ def _rebalance_not_harmful(ev, st, cfg: Mapping, cur: Mapping, step: Mapping) ->
     return gain >= settings.DID_REBALANCE_MIN_HEALTH_GAIN - 1e-12
 
 
-def _change(wid, patch, status, st, ev, notes, limit, cfg) -> DesiredChange:
+def _change(wid, patch, status, st, ev, notes, limit, cfg, moves=()) -> DesiredChange:
     flagged_live = [d for d in st["flagged"] if _config_share(cfg, d) > 1e-9]  # in ANY allocation key
     bad_live = [d for d in st["weak"] if _config_share(cfg, d) > 1e-9]
     status_txt = ", ".join(f"{d}={s}" for d, s in status.items())
@@ -345,6 +350,8 @@ def _change(wid, patch, status, st, ev, notes, limit, cfg) -> DesiredChange:
     if flagged_live:
         worst = min(st["flagged"][d]["q_est"] for d in flagged_live)
         evidence["flag_evacuation"] = worst < settings.DID_EVAC_FAST_RATIO
+        evidence["impact_override"] = did_plan.evacuation_impact(
+            moves, {d: 1.0 - st["flagged"][d]["q_est"] for d in flagged_live})
         summary = (f"Evacuate flagged caller ID {', '.join(flagged_live)} (pickup ratio vs peers x{worst:.2f}): "
                    + "; ".join(notes))
         return DesiredChange(wid, "did_evacuation", Priority.INCIDENT, patch, route, evidence, summary)

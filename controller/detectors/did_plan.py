@@ -125,6 +125,19 @@ def plan_step(current: Mapping[str, float], target: Mapping[str, float], max_shi
     return _clean(out)
 
 
+def evacuation_impact(moves, deficits: Mapping[str, float]) -> float:
+    """Impact of a safety move: traffic share moved off flagged DIDs x their relative pickup deficit, on the
+    same scale as ``dryrun.impact_score`` (a 10% workflow-wide relative gain scores 1.0). ``moves`` is a list of
+    ``(current, step)`` caller_id splits, one per allocation key; the largest key counts (no cohort weights here).
+    """
+    from ..dryrun import IMPACT_FULL_LIFT
+    best = 0.0
+    for cur, step in moves:
+        gain = sum(max(0.0, cur.get(d, 0.0) - step.get(d, 0.0)) * deficit for d, deficit in deficits.items())
+        best = max(best, gain)
+    return round(min(1.0, best / IMPACT_FULL_LIFT), 4)
+
+
 def expected_health(ev, alloc: Mapping[str, float], quality: Mapping[str, float]) -> float:
     """Expected traffic-weighted pickup health of ``alloc``: per-DID observed pickup ratio at comparable load
     (``quality``, 1 when unknown) times the fatigue-curve health at the load the DID would carry."""

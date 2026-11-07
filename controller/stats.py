@@ -11,6 +11,15 @@ def norm_sf(z: float) -> float:
     return 0.5 * math.erfc(z / math.sqrt(2.0))
 
 
+P_FLOOR = 1e-300
+
+
+def p_text(p: float) -> str:
+    """``p=3.2e-07``; an exactly-zero p is a float underflow of a correct tiny tail (erfc underflows near z=38),
+    so it prints as ``p<1e-300`` rather than ``p=0.0e+00``. Formatting only: decisions use the float."""
+    return f"p<{P_FLOOR:.0e}" if p < P_FLOOR else f"p={p:.1e}"
+
+
 def two_prop_z(x1: int, n1: int, x2: int, n2: int, alternative: str = "less") -> tuple[float, float]:
     """Pooled two-proportion z-test of group 1 against group 2.
 

@@ -213,7 +213,7 @@ def evaluate(series: DidSeries, curve: FatigueCurve, cur_hour: int, options: Seq
 
 
 def p_value_text(p: float) -> str:
-    return f"{p:.2e}" if p < 0.001 else f"{p:.3f}"
+    return f"{p:.2e}" if 1e-300 <= p < 0.001 else ("<1e-300" if p < 1e-300 else f"{p:.3f}")
 
 
 def z_to_p(z: float) -> float:

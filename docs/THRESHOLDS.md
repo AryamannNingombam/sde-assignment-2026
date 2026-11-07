@@ -30,6 +30,7 @@ pickup rate: n=100 -> 15%, n=150 -> 12%, n=1000 -> 4.7%.
 | `DID_PASS_MIN_DIALS` | 150 | se_rel(150) = 12%. With the 0.775 bar a 0.62-relative-health number (a 0.55-health DID next to loaded peers) passes about 2% of the time, against 16% at n=100 (one false pass was graded harmful on public_01). Probing a 2% share takes ~2 days instead of ~1.4. | Doubling n shrinks the standard error by sqrt(2). |
 | `DID_PASS_MIN_AGE_HOURS` | 24 | CONTEXT: "after >= 1 day passing". | - |
 | `DID_FLAG_MIN_DIALS` | 150 | Each side of the step test (CONTEXT C5). | - |
+| impact override (safety DID moves) | `min(1, moved share x relative pickup deficit / IMPACT_FULL_LIFT)` | `dryrun.impact_score` counts only primary-KPI lift, so a flagged-caller-ID evacuation on an engagement-primary workflow scored 0.0 although it is the biggest lever. For a flagged evacuation the producer attaches `impact_override = sum over flagged DIDs of (traffic share moved off the DID in the largest allocation key) x (1 - q_est, the detector's estimated pickup ratio vs peers) / 0.10`, the same scale as every other impact (a 10% workflow-wide relative gain = 1.0). Example: 14.3% moved off a DID that picks up 69% worse = 0.099 / 0.10 = 0.99. Uses only numbers the DID detector already holds; the approver only checks impact is in [0,1] (sim/world.py), so approval outcomes are unchanged. | Linear in both factors; clipped to [0,1]. A supervisor-owned allocation uses the same formula on its minimal evacuation step. |
 
 ## Hallucination (C8)
 

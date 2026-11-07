@@ -19,7 +19,7 @@ from ..desired import DEFAULT_REGISTRY, ROUTE_APPROVAL, DesiredChange, PlanConte
 from ..incidents import (can_spend, close_incident, daily_cap_ok, initial_credits, open_incident, open_incidents, pick_validation_n,
                          recover_validations, run_validation, update_incident, validation_cost, validation_for,
                          validations_of)
-from ..stats import non_inferior, rate_greater_test, wilson_lower, wilson_upper
+from ..stats import non_inferior, p_text, rate_greater_test, wilson_lower, wilson_upper
 from . import halluc_data as hd
 from .common import latest_config, load_state, once_alert, save_state
 
@@ -319,7 +319,7 @@ def _open(ctx, wid: str, st: dict, live: str, base_prompt, test: dict, kind: str
     hd.save(ctx.store, wid, st)
     inc_id = open_incident(ctx.store, wid, KIND, ctx.now, body)
     ctx.store.add_alert(ctx.now, "warn", "halluc_incident",
-                        f"{kind}: {live} flags {test['rate']:.1%} vs {test['base_rate']:.1%} (n={test['n']}, p={test['p']:.1e})", wid)
+                        f"{kind}: {live} flags {test['rate']:.1%} vs {test['base_rate']:.1%} (n={test['n']}, {p_text(test['p'])})", wid)
     prepare_fix(ctx, wid, body, st, live, lambda: update_incident(ctx.store, inc_id, body))
     update_incident(ctx.store, inc_id, body)
 
@@ -337,7 +337,7 @@ def _production_spike(ctx, wid: str, st: Mapping, live: str) -> tuple[dict, str 
     ceil = ceiling_test(win, ceiling)
     if ctx.now % 60 < settings.TICK_MINUTES and test is not None:  # hourly audit row
         ctx.store.add_decision(ctx.now, "halluc_eval", f"{live}: flags {test['rate']:.2%} vs {test['base_rate']:.2%}"
-                               f" (n={test['n']}, p={test['p']:.2e}, ceiling {ceiling:.1%})", wid,
+                               f" (n={test['n']}, {p_text(test['p'])}, ceiling {ceiling:.1%})", wid,
                                {**test, "prompt": live, "ceiling": ceiling})
     if test is not None and test["triggered"]:
         return test, base_prompt, "prompt_flag_spike"
@@ -500,7 +500,7 @@ def halluc_producer(ctx: PlanContext, wid: str) -> list[DesiredChange]:
         base = f"{s['base_rate']:.1%} baseline ({body['baseline_prompt']})" if body.get("baseline_prompt") else "failed Day-0 validation"
         summary = (f"Revert {live} ({_describe_edit(body['edit'])}) to {target}" if cand["source"] == "known_good"
                    else f"Replace {live} ({_describe_edit(body['edit'])}) with {target}")
-        summary += (f": flags {s['rate']:.1%} vs {base} (n={s['n']}, p={s['p']:.1e}); "
+        summary += (f": flags {s['rate']:.1%} vs {base} (n={s['n']}, {p_text(s['p'])}); "
                     f"validation {cand['validation_run_id']} pass {cand['pass_rate']:.3f}")
         excess = max(s["rate"] - s["base_rate"], 0.0)
         evidence = {"validation_run_id": cand["validation_run_id"], "impact_override": min(1.0, excess / max(_ceiling(ctx.workflows[wid]), 1e-9)),
