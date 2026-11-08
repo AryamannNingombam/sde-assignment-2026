@@ -1,0 +1,2 @@
+# run.sh executes on Linux, so it must keep LF even when committed from Windows.
+*.sh text eol=lf

@@ -123,3 +123,27 @@ def prob_drop_exceeds(diff: float, se: float, limit: float) -> float:
 
 def poisson_binomial_z(observed: float, expected: float, variance: float) -> float:
     return 0.0 if variance <= 0 else (observed - expected) / math.sqrt(variance)
+
+
+def binomial_tail(successes: int, n: int, p: float) -> float:
+    """Exact P(X >= successes). Use this for rare events.
+
+    A normal approximation at 4 expected events understates the tail by orders of magnitude.
+    That mistake opened a false hallucination incident on a scenario that has none.
+    """
+    if successes <= 0:
+        return 1.0
+    if successes > n or p <= 0:
+        return 0.0
+    if p >= 1:
+        return 1.0
+    log_p, log_q = math.log(p), math.log1p(-p)
+    log_term = (math.lgamma(n + 1) - math.lgamma(successes + 1) - math.lgamma(n - successes + 1)
+                + successes * log_p + (n - successes) * log_q)
+    total = term = math.exp(log_term)
+    for k in range(successes, n):
+        term *= (n - k) / (k + 1) * p / (1 - p)
+        total += term
+        if term < total * 1e-16:
+            break
+    return min(total, 1.0)
