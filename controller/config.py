@@ -20,6 +20,7 @@ STABILITY_RECENT_DAYS = 2
 STABILITY_Z = 1.645
 HARM_ALPHA = 0.005        # one-sided, per look: drop an arm that is clearly worse than control
 HARM_MIN_CONNECTED = 200  # no harm call below this many connected calls per arm
+MIN_ARM_SAMPLE = 200      # no winner below this many observations, whatever the p-value says
 
 # --- Cohorts -----------------------------------------------------------------------------------
 # At p=0.3, 200 connected per arm gives a standard error near 4.6 points, so only large

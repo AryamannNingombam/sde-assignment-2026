@@ -35,6 +35,8 @@ class Governance:
         self.store, self.client, self.specs, self.segments = store, client, specs, segments
         self.on_applied: dict[str, Callable] = {}
         self.on_dropped: dict[str, Callable] = {}
+        # Kinds whose claim can go out of date. These are re-decided rather than re-sent.
+        self.on_released: dict[str, Callable] = {}
 
     # --- intents ------------------------------------------------------------------------------
     def enqueue(self, wid: str, kind: str, priority: int, ops: list[dict], evidence: dict, now: int, key: str) -> str:
@@ -58,6 +60,11 @@ class Governance:
     def _release(self, proposal_id: str, now: int, reason: str, penalise: bool) -> None:
         """Returns a failed proposal's intents to the queue, to be rebuilt with fresh data."""
         for r in self.store.q("SELECT * FROM intents WHERE proposal_id=? AND status='in_proposal'", proposal_id):
+            redecide = self.on_released.get(r["kind"])
+            if redecide:
+                self.store.x("UPDATE intents SET status='superseded' WHERE intent_id=?", r["intent_id"])
+                redecide(dict(r), now, reason)
+                continue
             attempts = r["attempts"] + (1 if penalise else 0)
             if attempts >= cfg.MAX_PROPOSAL_ATTEMPTS:
                 self.store.x("UPDATE intents SET status='dropped', attempts=? WHERE intent_id=?", attempts, r["intent_id"])

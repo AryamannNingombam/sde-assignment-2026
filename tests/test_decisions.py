@@ -526,6 +526,96 @@ def test_winner_whose_lift_collapsed_inside_the_test_is_not_promoted(world):
     assert store.q("SELECT 1 FROM decisions WHERE kind='winner_unstable'")
 
 
+def _reject_open_promotion(world, exp, now):
+    store, sim, _, gov = world
+    gov.flush(WID, now)
+    aid = next(a for a in sim.approvals_by_id.values() if a["status"] == "pending")["approval_id"]
+    sim.decide(aid, "rejected", ["approver declined"])
+    gov.poll(WID, now + 60)
+
+
+def test_rejected_winner_is_retested_and_dropped_if_it_has_since_decayed(world):
+    # Found in a real run: evidence from D4 was re-sent three times and promoted a dead variant on D7.
+    store = world[0]
+    exp = _exp(world)
+    _running(store, start_minute=0)
+    for day in (0, 1, 2, 3):
+        _fact(store, day, 2, "V1", 800, 240)
+        _fact(store, day, 2, "V2", 800, 400)
+    exp.daily(WID, base_config(), 3 * 1440 + 660)
+    assert store.one("SELECT status FROM experiments")["status"] == "concluding"
+    _reject_open_promotion(world, exp, 3 * 1440 + 660)
+    assert store.one("SELECT status FROM experiments")["status"] == "running"
+    for day in (4, 5, 6, 7):
+        _fact(store, day, 2, "V1", 800, 240)
+        _fact(store, day, 2, "V2", 800, 230)
+    exp.daily(WID, base_config(), 8 * 1440 + 660)
+    newest = store.q("SELECT ops FROM intents WHERE kind='promote' AND status='queued'")
+    assert len(newest) == 1 and json.loads(newest[0]["ops"])[0]["dist"] == {"V1": 1.0}
+
+
+def test_rejected_winner_that_still_holds_is_promoted_on_retest(world):
+    store = world[0]
+    exp = _exp(world, end=20 * 1440)
+    _running(store, start_minute=0)
+    for day in (0, 1, 2, 3):
+        _fact(store, day, 2, "V1", 800, 240)
+        _fact(store, day, 2, "V2", 800, 400)
+    exp.daily(WID, base_config(), 3 * 1440 + 660)
+    _reject_open_promotion(world, exp, 3 * 1440 + 660)
+    _fact(store, 4, 2, "V1", 800, 240)
+    _fact(store, 4, 2, "V2", 800, 400)
+    exp.daily(WID, base_config(), 4 * 1440 + 660 + 1440)
+    newest = store.q("SELECT ops FROM intents WHERE kind='promote' AND status='queued'")
+    assert json.loads(newest[0]["ops"])[0]["dist"]["V2"] == pytest.approx(1 - cfg.HOLDOUT_SHARE, abs=1e-4)
+
+
+def test_experiment_stalls_visibly_after_repeated_rejection(world):
+    store = world[0]
+    exp = _exp(world, end=40 * 1440)
+    _running(store, start_minute=0)
+    for day in range(20):
+        _fact(store, day, 2, "V1", 800, 240)
+        _fact(store, day, 2, "V2", 800, 400)
+    now = 3 * 1440 + 660
+    for _ in range(cfg.MAX_PROPOSAL_ATTEMPTS):
+        exp.daily(WID, base_config(), now)
+        _reject_open_promotion(world, exp, now)
+        now += 2 * 1440
+    assert store.one("SELECT status FROM experiments")["status"] == "stalled"
+    assert store.q("SELECT 1 FROM decisions WHERE kind='experiment_stalled'")
+
+
+def test_tiny_sample_cannot_win_however_small_the_p_value(world):
+    store = world[0]
+    exp = _exp(world)
+    _running(store, start_minute=0)
+    for day in (0, 1, 2, 3):
+        _fact(store, day, 2, "V1", 800, 240)
+        _fact(store, day, 2, "V2", 40, 39)
+    exp.daily(WID, base_config(), 3 * 1440 + 660)
+    assert not _intents(store, "promote")
+
+
+def test_underpowered_guardrail_does_not_block_on_noise(world):
+    # Found in a real run: 30 connected calls could never rule out a 2 point drop, so every caller
+    # ID trial winner was thrown away.
+    store = world[0]
+    exp = _exp(world)
+    rows = [{"day": 0, "config_version": 2, "prompt": "P1", "seg": 0, "welcome": "W1", "voice": "V2", "did": "D1", "dials": 100, "connected": 30, "engaged": 15},
+            {"day": 0, "config_version": 2, "prompt": "P1", "seg": 0, "welcome": "W1", "voice": "V1", "did": "D1", "dials": 100, "connected": 30, "engaged": 15}]
+    ok, info = exp._guardrail_ok(spec(objective={"primary": "pickup_rate", "guardrail": {"engagement_rate_max_drop": 0.02}}), rows, "voice", "V2", ["V1"])
+    assert ok and "underpowered" in info["note"]
+
+
+def test_underpowered_guardrail_still_blocks_on_a_bad_estimate(world):
+    exp = _exp(world)
+    rows = [{"day": 0, "config_version": 2, "prompt": "P1", "seg": 0, "welcome": "W1", "voice": "V2", "did": "D1", "dials": 100, "connected": 30, "engaged": 8},
+            {"day": 0, "config_version": 2, "prompt": "P1", "seg": 0, "welcome": "W1", "voice": "V1", "did": "D1", "dials": 100, "connected": 30, "engaged": 15}]
+    ok, _ = exp._guardrail_ok(spec(objective={"primary": "pickup_rate", "guardrail": {"engagement_rate_max_drop": 0.02}}), rows, "voice", "V2", ["V1"])
+    assert not ok
+
+
 def test_clearly_worse_arm_is_stopped_early(world):
     store = world[0]
     exp = _exp(world)

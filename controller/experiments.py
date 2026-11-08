@@ -42,6 +42,8 @@ class Experiments:
             governance.on_applied[kind] = fn
         for kind in ("experiment_start", "did_explore"):
             governance.on_dropped[kind] = self._never_ran
+        for kind in ("promote", "did_promote"):
+            governance.on_released[kind] = self._reopen
 
     # --- planning -----------------------------------------------------------------------------
     def plan(self, wid: str, config: dict, now: int) -> None:
@@ -129,6 +131,24 @@ class Experiments:
         self.store.audit(now, intent["workflow_id"], "experiment_never_ran", "permission was not granted; no arm data exists",
                          {"exp_id": evidence["exp_id"]})
 
+    def _reopen(self, intent: dict, now: int, reason: str) -> None:
+        """A conclusion that was not applied gets re-decided on all the data by the next daily look.
+
+        Re-sending the old evidence is how a variant that had since decayed got promoted (memo 05:
+        requeue with fresh data). The same nominal alpha is reused rather than spending more.
+        """
+        evidence = json.loads(intent["evidence"])
+        row = self.store.one("SELECT * FROM experiments WHERE exp_id=?", evidence["exp_id"])
+        if row is None or row["status"] != "concluding":
+            return
+        state = json.loads(row["state"])
+        state["retests"] = state.get("retests", 0) + 1
+        status = "running" if state["retests"] < cfg.MAX_PROPOSAL_ATTEMPTS else "stalled"
+        self.store.x("UPDATE experiments SET status=?, state=? WHERE exp_id=?", status, json.dumps(state), row["exp_id"])
+        self.store.audit(now, intent["workflow_id"], "experiment_reopened" if status == "running" else "experiment_stalled",
+                         f"{row['dim']} conclusion not applied ({reason}); " + ("will re-test on fresh data" if status == "running" else "giving up, needs a human"),
+                         {"exp_id": row["exp_id"], "retests": state["retests"]})
+
     def _promoted(self, intent: dict, version: int, now: int) -> None:
         evidence = json.loads(intent["evidence"])
         self.store.x("UPDATE experiments SET status='concluded', end_minute=? WHERE exp_id=?", now, evidence["exp_id"])
@@ -208,10 +228,15 @@ class Experiments:
         t = 1.0 if final else max(info, elapsed)
         spent_total = stats.obf_alpha_spent(t, cfg.ALPHA_FAMILY)
         nominal = max(spent_total - state["alpha_spent"], 0.0)
+        if state.get("decision_alpha"):
+            nominal, final = state["decision_alpha"], True  # a re-test of a conclusion already reached
         state["alpha_spent"], state["looks"] = max(spent_total, state["alpha_spent"]), state["looks"] + 1
         pvals = {a: c.p_two_sided for a, c in comps.items()}
         rejected = stats.holm_rejections(pvals, nominal)
-        winners = sorted((a for a in rejected if comps[a].diff > 0), key=lambda a: -comps[a].diff)
+        winners = sorted((a for a in rejected if comps[a].diff > 0 and min(comps[a].n_t, comps[a].n_c) >= cfg.MIN_ARM_SAMPLE),
+                         key=lambda a: -comps[a].diff)
+        if winners:
+            state["decision_alpha"] = nominal
         self.store.audit(now, wid, "experiment_look", f"{dim} look {state['looks']}: {winners or 'no winner yet'}",
                          {"exp_id": exp["exp_id"], "information_fraction": round(t, 3), "nominal_alpha": nominal,
                           "alpha_spent": state["alpha_spent"], "final": final,
@@ -255,7 +280,12 @@ class Experiments:
         if c is None:
             return True, {"kpi": kpi, "note": "no data"}
         prob = stats.prob_drop_exceeds(c.diff, c.se, limit)
-        return prob <= cfg.GUARDRAIL_BLOCK_PROB, {"kpi": kpi, "limit": limit, "prob_exceeds": round(prob, 4), **_fmt(c)}
+        info = {"kpi": kpi, "limit": limit, "prob_exceeds": round(prob, 4), **_fmt(c)}
+        if c.se > limit:
+            # With noise wider than the limit the probability is high for any arm, so it would
+            # block everything. All the data can say here is where the estimate sits.
+            return c.diff >= -limit, {**info, "note": "underpowered: judged on the point estimate"}
+        return prob <= cfg.GUARDRAIL_BLOCK_PROB, info
 
     def _conclude(self, exp: dict, spec: dict, config: dict, rows, comps: dict, winners: list[str], control: list[str], now: int) -> None:
         wid, dim = exp["workflow_id"], exp["dim"]
@@ -300,7 +330,7 @@ class Experiments:
                           "rationale": f"Daily-look group-sequential test, Holm across arms, family alpha {cfg.ALPHA_FAMILY}. "
                                        + " ".join(notes) + f" Guardrail: {guard or 'not applicable'}.",
                           "value_per_day": volume * best_lift * (1 - cfg.HOLDOUT_SHARE), "confidence": 0.9 if winner else 0.3},
-                         now, exp["exp_id"])
+                         now, f"{exp['exp_id']}:r{json.loads(exp['state']).get('retests', 0)}")
         self.store.audit(now, wid, "experiment_concluded", summary, {"exp_id": exp["exp_id"], "promotions": promotions})
 
     def _scan_slices(self, exp: dict, spec: dict, rows, global_winner: str | None, control: str, now: int):
@@ -386,7 +416,7 @@ class Experiments:
                           "summary": f"End caller-ID trial. Numbers that beat the incumbents: {names}",
                           "rationale": "Arms compared with pooled incumbents on pickup, Holm across arms. "
                                        "Trial numbers without evidence are removed rather than left running.",
-                          "value_per_day": 0.0, "confidence": 0.5}, now, exp["exp_id"] + ":end")
+                          "value_per_day": 0.0, "confidence": 0.5}, now, f"{exp['exp_id']}:end:r{json.loads(exp['state']).get('retests', 0)}")
         self.store.audit(now, wid, "experiment_concluded", f"caller_id: winners {passed}",
                          {"exp_id": exp["exp_id"], "arms": {a: _fmt(c) for a, c in comps.items()}})
 
