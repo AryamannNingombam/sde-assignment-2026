@@ -106,7 +106,7 @@ def _replay_change(cohort: str, dim: str, before: dict, after: dict, arms: dict)
                 "engagement_rate": round(sum(v * arms[k][2] / arms[k][1] for k, v in obs.items()) / weight, 4),
                 "pickup_rate": round(sum(v * arms[k][1] / arms[k][0] for k, v in obs.items()) / weight, 4),
             }
-    return {"cohort": cohort, "dim": dim, "from": before, "to": after, "expected_on_observed_arms": expected,
+    return {"cohort": cohort, "dim": dim, "from": co._readable(before), "to": co._readable(after), "expected_on_observed_arms": expected,
             "unobserved_arms": unobserved,
             "note": "unobserved arms have no historical calls and are excluded from the estimate" if unobserved else ""}
 
