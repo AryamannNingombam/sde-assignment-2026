@@ -129,7 +129,7 @@ Subgroups use Benjamini-Hochberg at q=0.05, an exploratory standard, and that ra
 
 A conclusion that doesn't get applied (rejected, expired or stale) is re-tested on all the data before re-sending. This fixed a real bug where evidence from D4 promoted a decayed variant on D7.
 
-**Decay and rollback.** After promotion, 15% stays on the old control. Each day: winner against control over 3 days. Rollback if credibly worse than control, or credibly below half the promotion lift and below a quarter of it in point estimate. A 15% holdout alone is underpowered, so control's 21-day pooled rate is used when the concurrent holdout agrees with it, and ignored when it doesn't. On public_01 W3 was rolled back on its day 3 after promotion. Noticing takes about 2 days.
+**Decay and rollback.** After promotion, 15% stays on the old control. Each day: winner against control over 3 days. Rollback if credibly worse than control, or credibly below half the promotion lift and below a quarter of it in point estimate. A 15% holdout alone is underpowered, so control's 21-day pooled rate is used when the concurrent holdout agrees with it, and ignored when it doesn't. **Noticing is slow, about 3–4 days:** on public_01 W3 was promoted on D3, as its decay began, and rolled back on D7. On public_02 it left traffic on day 6 after the decay began. The daily look and the 3-day window set that speed. A shorter window would catch decay sooner and false-alarm more.
 
 **Call time and caller ID.** Call time is cut (§2). Caller IDs: unused numbers get 5% each. Quarantine compares a number to concurrent peers over 6 hours (z≥4 and pickup ≤70% of peers), or to its own history at the same hours if it is the only number.
 
@@ -194,7 +194,7 @@ Measured on public_03_load, 12 workflows, full report in `reports/public_03_load
 | Wall-clock per simulated day | 71–172 s, including the simulator (limit: 600 s) |
 | Database at finish | 140 MB, plus 106 MB of gzipped events |
 
-**At 10× (extrapolated, not measured).** Ingest stays within real time: about 8.4M events/day at ~33k/s is 4–5 minutes. Memory grows to about 2.7 GB, inside 8 GB. **What breaks first is the single decision process.** Decide took 29–101 s per simulated day, so roughly 5–17 minutes at 10×, over the 10-minute target. Decide time varied by day (D3 was about 3× D0) and I didn't profile why. Then SQLite's single writer.
+**At 10× (extrapolated, not measured).** Ingest stays within real time: about 8.4M events/day at ~33k/s is 4–5 minutes. Memory grows to about 2.7 GB, inside 8 GB. **What breaks first is the single decision process.** Decide took 29–101 s per simulated day, so roughly 5–17 minutes at 10×, over the 10-minute target. Decide time varied by day (D3 was about 3.5× D0) and I didn't profile why. Then SQLite's single writer.
 **Partitioning:** all state is keyed by workflow and nothing is shared across tenants, so run N worker processes hash-partitioned by tenant, one database each, or Postgres with row-level ownership.
 
 ## 9. Reliability
@@ -301,7 +301,7 @@ The command then prints the diff, the dry run, KPIs before and after, and the ne
 5. One round per dimension. No re-experiment after rollback.
 6. Quarantined caller IDs never come back.
 7. Overlapping cohorts across dimensions follow first-match, so someone in two slices only gets the first slice's allocation.
-8. Hallucination detection took about 4.5 hours on public_02. The false-alarm fix bought precision with latency.
+8. Hallucination detection took about 4.75 hours on public_02 (edit at 11:30, incident at 16:15). The false-alarm fix bought precision with latency. Decay detection is also slow, at 3–4 days (§5).
 9. No pause switch per workflow. The runbook describes a manual route.
 10. Meera's weekly summary and pager integration aren't built.
 11. An experiment that stalls after repeated rejection stays on its split allocation until a human acts, flagged only in the audit log.
