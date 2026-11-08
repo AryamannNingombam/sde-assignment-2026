@@ -165,6 +165,47 @@ def test_supervisor_cohorts_keep_precedence_over_ours():
     assert [c["id"] for c in out["cohorts"]] == ["vip", "c_lang_ta"]
 
 
+def _server_normalise(dist):
+    total = sum(dist.values())
+    return {k: v / total for k, v in dist.items()}
+
+
+@pytest.mark.parametrize("dist", [
+    {"V1": 0.5, "V2": 1 / 6, "V3": 1 / 6, "V4": 1 / 6},
+    {"V1": 1, "V2": 1, "V3": 1},
+    {"D1": 0.475, "D2": 0.475, "D3": 0.05},
+    {"W1": 0.85, "W2": 0.15},
+    {"A": 0.1, "B": 0.2, "C": 0.3, "D": 0.4},
+    {"A": 3, "B": 7, "C": 11, "D": 13, "E": 17, "F": 19, "G": 23},
+])
+def test_weights_do_not_change_on_the_servers_write_round_trip(dist):
+    # Found in a real run: float drift made a caller-ID auto-apply report voice as changed too.
+    out = co._normalise(dist)
+    assert sum(out.values()) == 1.0
+    assert _server_normalise(out) == out
+    assert _server_normalise(dict(reversed(list(out.items())))) == dict(reversed(list(out.items())))
+
+
+def test_normalised_weights_stay_close_to_what_was_asked():
+    assert co._normalise({"V2": 0.85, "V1": 0.15})["V2"] == pytest.approx(0.85, abs=1e-4)
+
+
+def test_drifting_weights_are_detected():
+    drifting = base_config()
+    drifting["allocations"]["default"]["voice"] = {"V1": 0.4999995000004999, "V2": 0.16666683333316665, "V3": 0.16666683333316665, "V4": 0.16666683333316665}
+    assert not co.survives_normalisation(drifting)
+    assert co.survives_normalisation(base_config())
+
+
+def test_auto_apply_refuses_a_write_that_could_touch_a_customer_facing_dim(world):
+    store, sim, _, gov = world
+    sim.cfg["allocations"]["default"]["voice"] = {"V1": 0.4999995000004999, "V2": 0.16666683333316665, "V3": 0.16666683333316665, "V4": 0.16666683333316665}
+    _intent(gov, store, kind="did_quarantine", priority=90, ops=[{"op": "quarantine_did", "did": "D1", "replacements": []}])
+    gov.flush(WID, TEN)
+    assert not sim.history, "must not auto-apply"
+    assert sim.approval_posts == 1, "falls through to a human"
+
+
 def test_max_shift_measures_total_variation():
     new = base_config()
     new["allocations"]["default"]["caller_id"] = {"D2": 1.0}
@@ -454,7 +495,7 @@ def test_strong_winner_is_promoted_with_a_holdout(world):
         _fact(store, day, 2, "V2", 800, 400)
     exp.daily(WID, base_config(), 3 * 1440 + 660)
     ops = json.loads(_intents(store, "promote")[0]["ops"])
-    assert ops[0]["dist"] == {"V2": 1 - cfg.HOLDOUT_SHARE, "V1": cfg.HOLDOUT_SHARE}
+    assert ops[0]["dist"] == pytest.approx({"V2": 1 - cfg.HOLDOUT_SHARE, "V1": cfg.HOLDOUT_SHARE})
 
 
 def test_no_winner_at_the_end_returns_traffic_to_control(world):

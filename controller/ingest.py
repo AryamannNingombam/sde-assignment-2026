@@ -13,10 +13,14 @@ import time
 from collections import defaultdict
 from datetime import date
 
+import httpx
+
 from .cohorts import FEATURES
 from .store import Store, minute_of
 
 log = logging.getLogger("controller.ingest")
+
+MAX_CHUNK_ATTEMPTS = 8
 
 D0_DATE = date(2027, 1, 4)
 # Leads stay joinable this long after the end of their cadence, then memory is released.
@@ -61,8 +65,23 @@ class Ingestor:
         """Returns (events, milliseconds)."""
         events, t0 = 0, time.perf_counter()
         for meta in self.client.chunks(self.cursor()):
-            events += self._ingest_chunk(meta)
+            events += self._read_chunk_with_retry(meta)
         return events, int((time.perf_counter() - t0) * 1000)
+
+    def _read_chunk_with_retry(self, meta: dict) -> int:
+        """A dropped connection is routine, for example a server closing an idle keep-alive.
+
+        Re-reading is safe because nothing from a chunk is committed until all of it has arrived.
+        """
+        for attempt in range(MAX_CHUNK_ATTEMPTS):
+            try:
+                return self._ingest_chunk(meta)
+            except httpx.TransportError as e:
+                if attempt == MAX_CHUNK_ATTEMPTS - 1:
+                    raise
+                log.warning("chunk %s read failed (%s), attempt %d", meta["chunk"], e, attempt + 1)
+                time.sleep(min(2 ** attempt * 0.1, 5.0))
+        raise AssertionError("unreachable")
 
     def _day(self, ts: str) -> int:
         key = ts[:10]

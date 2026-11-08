@@ -1,6 +1,7 @@
 """Statistics, the shared cohort object, and exactly-once ingestion."""
 import json
 
+import httpx
 import pytest
 
 from controller import cohorts as ch
@@ -153,6 +154,28 @@ def test_partial_chunk_is_never_counted_and_is_reread(store):
     assert store.one("SELECT COUNT(*) n FROM fact_arm")["n"] == 0
     Ingestor(store, FakeFeed(data)).ingest_new()
     assert _totals(store) == (2, 1, 1, 0)
+
+
+class FlakyFeed(FakeFeed):
+    """Drops the connection on the first read of every chunk, part-way through."""
+
+    def __init__(self, chunks):
+        super().__init__(chunks)
+        self.failed = set()
+
+    def chunk_lines(self, n):
+        for i, ev in enumerate(self.data[n]):
+            if i == 1 and n not in self.failed:
+                self.failed.add(n)
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            yield json.dumps(ev)
+
+
+def test_dropped_connection_is_retried_without_double_counting(store):
+    # Found in a real run: the simulator closed an idle keep-alive connection and the process died.
+    Ingestor(store, FlakyFeed({0: [_lead(), _call(), _call(connected=False, engaged=False)]})).ingest_new()
+    assert _totals(store) == (2, 1, 1, 0)
+    assert store.one("SELECT leads FROM campaign_seg")["leads"] == 1
 
 
 def test_lead_join_survives_restart(store):

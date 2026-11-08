@@ -325,6 +325,12 @@ class Governance:
             if partial and intent["kind"] != "did_quarantine":
                 continue  # exploration that needs more than one step belongs with a human
             new = co.capped_step(old, target, limit) if partial else target
+            if set(co.changed_dims(old, new)) - {"caller_id"} or not co.survives_normalisation(new):
+                # Auto-apply must only ever touch caller ID. If a write could report anything
+                # else as changed, the decision belongs to a person.
+                self.store.audit(now, wid, "auto_apply_declined", "write would not be caller-ID only, routing to approval",
+                                 {"intent_id": intent["intent_id"], "dims": co.changed_dims(old, new)})
+                continue
             pid = self._proposal_id(wid, [intent["intent_id"]], now, [intent]) + "-auto"
             body = {"proposal_id": pid, "base_version": current["version"], "proposed_config": new,
                     "rationale": evidence["rationale"], "_partial": partial}

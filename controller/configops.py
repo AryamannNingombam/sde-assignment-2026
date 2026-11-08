@@ -10,9 +10,34 @@ import copy
 ALLOC_DIMS = ("welcome_message", "voice", "caller_id")
 
 
+WEIGHT_GRID = 2 ** 16
+
+
 def _normalise(dist: dict) -> dict:
+    """Weights on a binary grid that sum to exactly 1.0.
+
+    The simulator divides weights by their sum on every write and compares the result exactly. A
+    weight like 0.4999995 drifts by 1e-16 on the round trip, which reports that dimension as changed
+    and would get a caller-ID auto-apply refused for touching voice. Multiples of 2^-16 add exactly
+    in any order, so dividing by their sum of 1.0 leaves them untouched.
+    """
     total = sum(dist.values())
-    return {k: round(v / total, 6) for k, v in sorted(dist.items())} if total > 0 else {}
+    if total <= 0:
+        return {}
+    units = {k: round(v / total * WEIGHT_GRID) for k, v in sorted(dist.items())}
+    biggest = max(sorted(units), key=lambda k: units[k])
+    units[biggest] += WEIGHT_GRID - sum(units.values())
+    return {k: u / WEIGHT_GRID for k, u in units.items()}
+
+
+def survives_normalisation(config: dict) -> bool:
+    """False if any weight would change on a write, so that dimension would appear modified."""
+    for alloc in config.get("allocations", {}).values():
+        for dist in alloc.values():
+            total = sum(dist.values())
+            if total <= 0 or any(v / total != v for v in dist.values()):
+                return False
+    return True
 
 
 def effective(config: dict, cohort: str, dim: str) -> dict:
@@ -108,8 +133,12 @@ def diff(old: dict, new: dict) -> dict:
             a = old.get("allocations", {}).get(cohort, {}).get(dim)
             b = new.get("allocations", {}).get(cohort, {}).get(dim)
             if a != b:
-                out[f"allocations.{cohort}.{dim}"] = {"from": a, "to": b}
+                out[f"allocations.{cohort}.{dim}"] = {"from": _readable(a), "to": _readable(b)}
     return out
+
+
+def _readable(dist: dict | None) -> dict | None:
+    return {k: round(v, 3) for k, v in dist.items()} if dist else dist
 
 
 def capped_step(old: dict, new: dict, limit: float) -> dict:
