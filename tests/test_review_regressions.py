@@ -153,12 +153,14 @@ def test_poisson_tiny_tails_keep_their_precision():
     assert stats.poisson_upper_p(5000, 3.0) == 0.0                    # underflow terminates, no infinite loop
 
 
-def test_inconclusive_keeps_a_challenger_that_is_ahead_and_reverts_one_that_is_not():
-    """Review: 'inconclusive' means not proven better, not that control is better (pre-registered rule)."""
+def test_inconclusive_changes_config_only_on_evidence_of_harm():
+    """Pre-registered rule: at an inconclusive final look, revert only if the challenger is significantly worse.
+    The middle case is the Linux trace (ks_cancel V3 vs V1 within ~1pp, slightly behind): reverting it was graded
+    harmful twice, so a statistically indistinguishable challenger keeps its split under monitoring."""
     from controller.metrics import Counts
     spec = {"workflow_id": "wf", "objective": {"primary": "engagement_rate",
                                                 "guardrail": {"pickup_rate_max_drop": 0.02}}}
-    for ch_rate, expect_keep in ((0.524, True), (0.490, False)):
+    for ch_rate, expect_keep in ((0.524, True), (0.493, True), (0.440, False)):
         conn, exps = _experiments_env()
         store.set_meta(conn, "end_minute", parse("D10 00:00"))
         sim_cfg = configs.current(conn, "wf")[1]
@@ -174,6 +176,90 @@ def test_inconclusive_keeps_a_challenger_that_is_ahead_and_reverts_one_that_is_n
         action = exps._end_inconclusive(exp, spec, data, verdict, {}, parse("D6 12:00"))
         state = conn.execute("SELECT state FROM experiments WHERE id=?", (eid,)).fetchone()[0]
         if expect_keep:
-            assert action is None and state == "PROMOTED"          # split kept, monitored daily, no request
+            assert action is None and state == "MONITORING_SPLIT"   # kept, monitored, never shown as a promotion
         else:
             assert action.kind == "conclude" and action.patch["allocations"]["default"]["voice"] == {"V1": 1.0}
+
+
+def test_promotion_needs_the_latest_window_not_to_show_the_challenger_behind():
+    """Linux trace (nw_renewal W3, public_01): pooled stage-2 p=0.007 carried by early days (+9pp, +5pp) while the
+    last two days had W3 3pp behind; promoting it was graded harmful. The recency check blocks that promotion."""
+    from controller.metrics import Counts
+    spec = {"workflow_id": "wf", "objective": {"primary": "engagement_rate",
+                                                "guardrail": {"pickup_rate_max_drop": 0.02}}}
+    conn, exps = _experiments_env()
+    eid = conn.execute("INSERT INTO experiments(wf, dim, kpi, stage, state, control, arms_json, screened_json,"
+                       " result_json) VALUES('wf','welcome_message','engagement_rate',2,'STAGE2','W1','[\"W3\"]',"
+                       "'[]','{}')").lastrowid
+    exp = conn.execute("SELECT * FROM experiments WHERE id=?", (eid,)).fetchone()
+    pooled = {"W3": Counts(dials=6000, connected=1590, concluded=919), "W1": Counts(dials=6000, connected=1593,
+                                                                                   concluded=852)}
+    fading = {"W3": Counts(dials=1800, connected=480, concluded=255), "W1": Counts(dials=1800, connected=471,
+                                                                                  concluded=266)}
+    holding = {"W3": Counts(dials=1800, connected=480, concluded=280), "W1": Counts(dials=1800, connected=471,
+                                                                                   concluded=255)}
+    assert exps.test_promotion(exp, spec, pooled)["primary_pass"]
+    assert not exps.test_promotion(exp, spec, pooled, fading)["promote"]
+    assert exps.test_promotion(exp, spec, pooled, holding)["promote"]
+
+
+def _decay_env(alloc: dict, dim: str):
+    """A promoted experiment on a Kestrel-like policy (welcome/voice auto-apply, max_shift 0.2), 4 days left."""
+    conn, _ = _experiments_env()
+    store.set_meta(conn, "end_minute", parse("D12 00:00"))
+    cfg = configs.current(conn, "wf")[1]
+    cfg["allocations"]["default"][dim] = alloc
+    conn.execute("UPDATE config_versions SET config_json=?", (json.dumps(cfg),))
+    spec = {"workflow_id": "wf", "tenant_id": "t",
+            "objective": {"primary": "engagement_rate", "guardrail": {"pickup_rate_max_drop": 0.02}},
+            "governance": {"auto_apply": {"enabled": True, "allowed_dims": ["welcome_message", "voice"],
+                                          "max_shift": 0.2}}}
+    exps = Experiments(conn, {"wf": spec})
+    control = max(alloc, key=lambda o: -alloc[o])
+    winner = max(alloc, key=alloc.get)
+    eid = conn.execute("INSERT INTO experiments(wf, dim, kpi, stage, state, control, arms_json, screened_json,"
+                       " result_json, start_version, start_minute) VALUES('wf',?, 'engagement_rate', 3, 'PROMOTED',"
+                       " ?, ?, '[]', ?, 1, ?)", (dim, control, json.dumps([winner]), json.dumps({"d_max": 4}),
+                                                 parse("D7 13:00"))).lastrowid
+    return conn, exps, spec, eid
+
+
+def _day(conn, dim, day, winner, w, control, c):
+    """One day of calls: (dials, connected, concluded) per arm, inside the window ending at D<day> 13:00."""
+    col = {"voice": "voice", "welcome_message": "wm"}[dim]
+    for opt, (d, n, x) in ((winner, w), (control, c)):
+        vals = {"wm": "W1", "voice": "V1", col: opt}
+        conn.execute("INSERT INTO agg VALUES('wf', ?, 'hi|1|31-45|mid', 1, 'default', ?, ?, 'D1', 'P1', ?, ?, ?, 0,"
+                     " 0, 0)", (parse(f"D{day} 13:00") // 60 - 5, vals["wm"], vals["voice"], d, n, x))
+
+
+def _decay(conn, exps, spec, eid, day):
+    exp = conn.execute("SELECT * FROM experiments WHERE id=?", (eid,)).fetchone()
+    return exps._eval_decay(exp, spec, parse(f"D{day} 13:00"))
+
+
+def test_decay_case_b_one_small_holdback_window_no_longer_reverts():
+    """Traced case v13 (V3 -> V1, D9): engagement p=0.0073 on a holdback of 110 connected calls. Under the old
+    alpha 0.05/D_max = 0.0125 it fired a full revert of a variant that was in fact better. With the alpha split
+    across the two metrics (0.05 / (4 * 2) = 0.00625) the same window does not fire."""
+    conn, exps, spec, eid = _decay_env({"V3": 0.9, "V1": 0.1}, "voice")
+    _day(conn, "voice", 8, "V3", (3600, 990, 490), "V1", (400, 110, 68))
+    assert _decay(conn, exps, spec, eid, 8) is None
+    last = conn.execute("SELECT rule, inputs_json FROM decisions ORDER BY id DESC LIMIT 1").fetchone()
+    assert last["rule"] == "decay check: no decay" and json.loads(last["inputs_json"])["alpha_decay"] == 0.00625
+
+
+def test_decay_case_a_first_signal_only_derisks_and_needs_a_second_window():
+    """Traced case v11 (W2 -> W1, D8): pickup guardrail p=0.0036, which still clears the split alpha. A single
+    window now only cuts exposure by one in-policy step; the full revert needs the next fresh window too."""
+    conn, exps, spec, eid = _decay_env({"W2": 0.9, "W1": 0.1}, "welcome_message")
+    _day(conn, "welcome_message", 8, "W2", (3600, 870, 430), "W1", (400, 122, 60))
+    first = _decay(conn, exps, spec, eid, 8)
+    assert first.kind == "derisk"                                        # exposure cut, nothing reverted
+    _day(conn, "welcome_message", 9, "W2", (3600, 990, 490), "W1", (400, 110, 54))     # a quiet day
+    assert _decay(conn, exps, spec, eid, 9) is None                      # suspicion cleared, no revert
+    _day(conn, "welcome_message", 10, "W2", (3600, 870, 430), "W1", (400, 122, 60))
+    assert _decay(conn, exps, spec, eid, 10).kind == "derisk"            # a new first signal: still no revert
+    _day(conn, "welcome_message", 11, "W2", (3600, 870, 430), "W1", (400, 122, 60))
+    confirmed = _decay(conn, exps, spec, eid, 11)                        # second consecutive window
+    assert confirmed.kind == "rollback" and confirmed.patch["allocations"]["default"]["welcome_message"] == {"W1": 1.0}

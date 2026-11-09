@@ -150,6 +150,10 @@ class Governance:
             if policy.quota_left(self.conn, spec, wf, minute, urgent,
                                  safety_incident=p["kind"] == "incident_fix") <= 0:
                 continue
+            if p["kind"] == "incident_fix" and policy.quota_left(self.conn, spec, wf, minute, urgent) <= 0:
+                store.raise_alert(self.conn, minute, "summary", wf,
+                                  f"{p['proposal_id']}: hallucination fix sent beyond the tenant's stated daily "
+                                  "request limit (policy limit respected)")
             payload = json.loads(p["payload_json"])
             body = {
                 "proposal_id": p["proposal_id"], "workflow_id": wf, "base_version": base, "proposed_config": new,

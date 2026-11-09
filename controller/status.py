@@ -69,6 +69,7 @@ def snapshot(conn: sqlite3.Connection, minute: int, loop: dict) -> dict:
         "experiments": [dict(r) for r in conn.execute(
             "SELECT id, wf, dim, stage, state, control, arms_json AS arms FROM experiments"
             " WHERE state NOT IN ('KEPT_CONTROL','ROLLED_BACK','INVALIDATED','REJECTED','EXHAUSTED')")],
+        # MONITORING_SPLIT = an inconclusive test whose split was kept: monitored, never approved as a promotion
         "incidents": [dict(r) for r in conn.execute("SELECT id, wf, kind, state, credits_spent FROM incidents"
                                                     " WHERE state IN ('OPEN','PROPOSED','VERIFYING')")],
         "open_alerts": [dict(r) for r in conn.execute("SELECT minute, severity, wf, message FROM alerts"

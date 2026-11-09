@@ -5,8 +5,8 @@ Each run has its own fresh no-op baseline; Δ = change vs that run's baseline.
 
 | run | conclusion Δ (ALL) | ks_cancel primary Δ | nw_kyc primary Δ | nw_renewal primary Δ | changes | harmful | incident MTTR (min) | credits |
 |---|---|---|---|---|---|---|---|---|
-| published | +14.7% | +4.8% | +18.6% | -0.7% | 8 | 0 | 330 | 5 |
-| seed 2202 | +13.9% | +8.9% | +19.8% | +0.5% | 14 | 0 | 450 | 5 |
-| seed 3202 | +16.8% | +7.7% | +18.7% | -0.5% | 9 | 0 | 510 | 10 |
+| published | +15.5% | +7.7% | +8.1% | +0.7% | 9 | 0 | 330 | 5 |
+| seed 2202 | +17.1% | +9.4% | +16.6% | -2.9% | 11 | 0 | 330 | 15 |
+| seed 3202 | +16.2% | +7.4% | +18.1% | -0.7% | 11 | 0 | 330 | 5 |
 
-**Range:** conclusion rate +13.9% to +16.8% vs baseline; harmful changes 0-0 per run.
+**Range:** conclusion rate +15.5% to +17.1% vs baseline; harmful changes 0-0 per run.

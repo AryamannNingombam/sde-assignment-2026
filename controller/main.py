@@ -73,9 +73,16 @@ class Controller:
     def _load_workflows(self) -> dict[str, dict]:
         specs = {w["workflow_id"]: w for w in self.client.workflows()}
         with store.tx(self.conn):
+            decided = store.get_meta(self.conn, "decided_minute")
             for wf, w in specs.items():
                 self.conn.execute("INSERT INTO workflows VALUES(?,?,?) ON CONFLICT(wf) DO UPDATE SET"
                                   " spec_json=excluded.spec_json", (wf, w["tenant_id"], json.dumps(w)))
+                if decided is not None and store.get_meta(self.conn, f"observed_version:{wf}") is None:
+                    # a store from before observed_version existed: everything up to its last decision pass was
+                    # already acted on, so don't replay those edits
+                    seen = self.conn.execute("SELECT COALESCE(MAX(version), 0) FROM config_versions WHERE wf=? AND"
+                                             " COALESCE(minute, -1) <= ?", (wf, decided)).fetchone()[0]
+                    store.set_meta(self.conn, f"observed_version:{wf}", seen)
                 configs.sync(self.conn, self.client, self.clock, wf)
         return specs
 

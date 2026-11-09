@@ -25,7 +25,8 @@ from . import configs, governance, impact, metrics, policy, settings, stats, sto
 from .clock import MIN_PER_DAY, fmt, hour_of_day
 
 OWNER = "experiments"
-RUNNING = ("STAGE1", "STAGE2", "PROMOTED", "DERISKED")
+RUNNING = ("STAGE1", "STAGE2", "PROMOTED", "MONITORING_SPLIT", "DERISKED")
+MONITORED = ("PROMOTED", "MONITORING_SPLIT", "DERISKED")      # under the daily decay/harm check
 TRANSITIONAL = ("STARTING", "ADVANCING", "PROMOTING", "CONCLUDING", "ROLLING_BACK", "ABORTING")
 TERMINAL = ("KEPT_CONTROL", "ROLLED_BACK", "INVALIDATED", "REJECTED", "DERISKED_STALLED", "EXHAUSTED")
 ROUTINE_KINDS = ("explore", "advance", "promote", "conclude")
@@ -94,7 +95,7 @@ class Experiments:
             return self._eval_stage1(exp, spec, minute)
         if state == "STAGE2":
             return self._eval_stage2(exp, spec, minute)
-        if state in ("PROMOTED", "DERISKED"):
+        if state in MONITORED:
             return self._eval_decay(exp, spec, minute)
         return None
 
@@ -197,9 +198,11 @@ class Experiments:
             # Every pre-declared look is spent; we are back here because a promotion request didn't land. No new
             # test: re-propose only if a look already passed AND the result still holds now. Requiring both can only
             # lower the false-winner rate, so the family-wise alpha stays <= ALPHA.
-            verdict = self.test_promotion(exp, spec, data)
-            inputs = {"stage": 2, "recheck_of_passed_look": res.get("passed_look"), **verdict}
-            if res.get("passed_look") and verdict["promote"]:
+            verdict = self.test_promotion(exp, spec, data, self._recent(exp, minute))
+            inputs = {"stage": 2, "recheck_of_passed_look": res.get("passed_look"),
+                      "promote_asks": res.get("promote_asks", 0), **verdict}
+            if res.get("passed_look") and verdict["promote"] and \
+                    res.get("promote_asks", 0) < settings.PROMOTE_MAX_ASKS:
                 return self._promote(exp, spec, verdict, inputs, minute)
             return self._end_inconclusive(exp, spec, data, verdict, inputs, minute)
         look = exp["looks_done"] + 1
@@ -209,7 +212,7 @@ class Experiments:
         if not (due and spaced):
             return None
         self.conn.execute("UPDATE experiments SET looks_done=?, last_look_minute=? WHERE id=?", (look, minute, exp["id"]))
-        verdict = self.test_promotion(exp, spec, data)
+        verdict = self.test_promotion(exp, spec, data, self._recent(exp, minute))
         inputs = {"stage": 2, "efficacy_look": look, "of": settings.STAGE2_LOOKS, "n_required": n_req, **verdict}
         if verdict["promote"]:
             res["passed_look"] = look
@@ -222,26 +225,33 @@ class Experiments:
         return None
 
     def _end_inconclusive(self, exp, spec, data, verdict: dict, inputs: dict, minute: int) -> Action | None:
-        """Pre-registered (SUBMISSION §5): inconclusive means "not proven better", not "control is better".
+        """Pre-registered (SUBMISSION §5): inconclusive means "not proven better" AND "not proven worse".
 
-        Revert to control only if the challenger's point estimate is not above control, or its guardrail is
-        significantly worse. Otherwise leave the split exactly as it is (no change request) under the daily
-        harm/decay monitor, which rolls it back as soon as there is evidence against it."""
+        Change config only on evidence. Revert to control only if the challenger is significantly worse than
+        control on the primary or the guardrail (one-sided alpha = HARM_ALPHA). Otherwise leave the split exactly
+        as it is, with no change request, under the daily decay monitor; that monitor needs two consecutive
+        windows before a full revert. Reverting a challenger that is statistically indistinguishable from control
+        is a coin flip that costs a request, and it was graded harmful in 2 of 3 Linux runs."""
         ch = verdict["challenger"]
         g_kpi, _ = _guardrail(spec)
         a, b = data.get(ch, metrics.Counts()), data.get(exp["control"], metrics.Counts())
+        p_primary = stats.p_less(*a.num_den(exp["kpi"]), *b.num_den(exp["kpi"]))
         p_guard = stats.p_less(*a.num_den(g_kpi), *b.num_den(g_kpi))
-        ahead = (verdict["challenger_rate"] or 0) > (verdict["control_rate"] or 0)
-        inputs.update(challenger_ahead=ahead, p_guardrail_worse=_r(p_guard, 6))
-        if ahead and p_guard >= settings.HARM_ALPHA:
+        inputs.update(p_primary_worse=_r(p_primary, 6), p_guardrail_worse=_r(p_guard, 6))
+        if p_primary >= settings.HARM_ALPHA and p_guard >= settings.HARM_ALPHA:
             self._keep_split(exp, minute, inputs)
             return None
-        why = "challenger not ahead of control" if not ahead else f"guardrail {g_kpi} significantly worse"
+        why = f"{exp['kpi']} significantly worse" if p_primary < settings.HARM_ALPHA \
+            else f"guardrail {g_kpi} significantly worse"
         return self._conclude(exp, data, inputs, minute, reason=f"inconclusive at the final look and {why}: "
                                                                  "back to control")
 
-    def test_promotion(self, exp: sqlite3.Row, spec: dict, data: dict[str, metrics.Counts]) -> dict:
-        """Primary one-sided z at alpha* = alpha / looks, plus guardrail non-inferiority. Deterministic."""
+    def test_promotion(self, exp: sqlite3.Row, spec: dict, data: dict[str, metrics.Counts],
+                       recent: dict[str, metrics.Counts] | None = None) -> dict:
+        """Primary one-sided z at alpha* = alpha / looks, plus guardrail non-inferiority, plus a recency check:
+        the latest 24h must not show the challenger behind control. The pooled test can be carried by strong early
+        days of a variant that is already fading; the recency check is an extra requirement, so it can only lower
+        the false-winner rate. Deterministic."""
         ch, ctrl = json.loads(exp["arms_json"])[0], exp["control"]
         a, b = data.get(ch, metrics.Counts()), data.get(ctrl, metrics.Counts())
         x1, n1 = a.num_den(exp["kpi"])
@@ -253,15 +263,22 @@ class Experiments:
         gx0, gn0 = b.num_den(g_kpi)
         g_ok = stats.noninferior(gx1, gn1, gx0, gn0, max_drop, settings.GUARDRAIL_CI_Z)
         lcb = stats.diff_lower_bound(x1, n1, x0, n0, settings.GUARDRAIL_CI_Z)
+        ra, rb = ((recent or {}).get(ch, metrics.Counts()), (recent or {}).get(ctrl, metrics.Counts()))
+        r1, r0 = ra.rate(exp["kpi"]), rb.rate(exp["kpi"])
+        recent_ok = recent is None or r1 is None or r0 is None or r1 >= r0
         return {"challenger": ch, "control": ctrl, "primary": exp["kpi"],
                 "challenger_rate": _r(x1 / n1 if n1 else None), "control_rate": _r(x0 / n0 if n0 else None),
                 "n": [n1, n0], "p_value": _r(p, 6), "alpha_star": alpha_star, "primary_pass": p < alpha_star,
                 "lift_lcb95": _r(lcb), "guardrail": g_kpi, "guardrail_max_drop": max_drop,
                 "guardrail_lcb95": _r(stats.diff_lower_bound(gx1, gn1, gx0, gn0, settings.GUARDRAIL_CI_Z)),
-                "guardrail_pass": g_ok, "promote": p < alpha_star and g_ok}
+                "guardrail_pass": g_ok, "recent_challenger_rate": _r(r1), "recent_control_rate": _r(r0),
+                "recent_not_behind": recent_ok, "promote": p < alpha_star and g_ok and recent_ok}
 
     def _promote(self, exp: sqlite3.Row, spec: dict, verdict: dict, inputs: dict, minute: int) -> Action:
         ch, ctrl, dim = verdict["challenger"], exp["control"], exp["dim"]
+        res = json.loads(self._row(exp["id"])["result_json"])
+        res["promote_asks"] = res.get("promote_asks", 0) + 1
+        self._save_result(exp, res)
         carve = self._band_safety(exp, ch, minute)
         patch: dict = {"allocations": {"default": {dim: {ch: 1 - settings.HOLDBACK, ctrl: settings.HOLDBACK}}}}
         if carve:
@@ -308,33 +325,56 @@ class Experiments:
         data = metrics.by_option(self.conn, exp["wf"], exp["dim"], since_hour=h - settings.DECAY_WINDOW_MIN // 60,
                                  until_hour=h, min_version=exp["start_version"], cohorts=self._cohorts(exp))
         a, b = data.get(ch, metrics.Counts()), data.get(exp["control"], metrics.Counts())
-        alpha = settings.ALPHA / res["d_max"]
+        alpha = settings.ALPHA / (res["d_max"] * settings.DECAY_METRICS)
         g_kpi, _ = _guardrail(spec)
         p_primary = stats.p_less(*a.num_den(exp["kpi"]), *b.num_den(exp["kpi"]))
         p_guard = stats.p_less(*a.num_den(g_kpi), *b.num_den(g_kpi))
         inputs = {"window": [fmt(minute - settings.DECAY_WINDOW_MIN), fmt(minute)], "alpha_decay": round(alpha, 5),
                   "counts": _counts_dict(data, exp["kpi"]), "p_primary_worse": _r(p_primary, 6),
                   "p_guardrail_worse": _r(p_guard, 6), "check": res["decay_checks"], "d_max": res["d_max"]}
-        if exp["state"] == "DERISKED" or res.get("client_kept"):
-            inputs["note"] = "rollback already requested or declined; monitoring only unless new evidence fires"
         fired = p_primary < alpha or p_guard < alpha
+        streak = res.get("decay_streak", 0) + 1 if fired else 0
+        res["decay_streak"] = streak
+        self._save_result(exp, res)
+        inputs["consecutive_windows_fired"] = streak
         if not fired:
             store.record_decision(self.conn, minute, exp["wf"], "experiment", "decay check: no decay", inputs,
-                                  "keep", experiment_id=exp["id"])
-            return None
-        if exp["state"] == "DERISKED":
-            store.record_decision(self.conn, minute, exp["wf"], "experiment", "decay check fired while de-risked",
-                                  inputs, "full revert already pending", experiment_id=exp["id"])
+                                  "keep the de-risked split" if exp["state"] == "DERISKED" else "keep",
+                                  experiment_id=exp["id"])
             return None
         what = exp["kpi"] if p_primary < alpha else g_kpi
         harm = (b.rate(what) or 0) - (a.rate(what) or 0)
+        impact_score = impact.score_harm_avoided(harm, 1 - settings.HOLDBACK)
+        if res.get("revert_requested"):
+            store.record_decision(self.conn, minute, exp["wf"], "experiment", "decay check fired again",
+                                  inputs, "full revert already requested", experiment_id=exp["id"])
+            return None
+        if streak < settings.DECAY_CONFIRM_WINDOWS:
+            # One window of a 10% holdback is ~100 calls: never enough on its own for a full revert. Cut exposure
+            # with a single in-policy step if the policy allows one, and let the next fresh window decide.
+            if exp["state"] in ("PROMOTED", "MONITORING_SPLIT") and not res.get("client_kept") \
+                    and self._derisk_possible(exp, spec):
+                return Action("derisk", exp["id"], "DERISKED",
+                              {"allocations": {"default": {exp["dim"]: {exp["control"]: 1.0}}}},
+                              f"Cut {exp['dim']} {ch} exposure by one in-policy step (first decay signal)",
+                              f"First decay signal ({what}: {ch} {_pct(a.rate(what))} vs holdback {exp['control']} "
+                              f"{_pct(b.rate(what))}, one-sided p < {alpha:.4f}). One window of the holdback is small, "
+                              f"so only exposure is cut now; the full revert is requested only if the next fresh "
+                              f"daily window confirms.", impact_score, inputs)
+            store.record_decision(self.conn, minute, exp["wf"], "experiment",
+                                  "first decay signal: waiting for the next window to confirm", inputs, "watch",
+                                  experiment_id=exp["id"])
+            return None
+        if exp["state"] == "DERISKED":
+            self._draft_full_revert(exp, minute, impact_score, inputs)
+            return None
         return Action("rollback", exp["id"], "ROLLED_BACK",
                       {"allocations": {"default": {exp["dim"]: {exp["control"]: 1.0}}}},
                       f"Roll back {exp['dim']} {ch} to {exp['control']} (winner decayed)",
-                      f"Daily decay check {res['decay_checks']}: over {inputs['window'][0]}..{inputs['window'][1]} "
-                      f"{ch} {_pct(a.rate(what))} vs holdback {exp['control']} {_pct(b.rate(what))} on {what}, "
-                      f"one-sided p < {alpha:.4f} (alpha 0.05 split over {res['d_max']} checks).",
-                      impact.score_harm_avoided(harm, 1 - settings.HOLDBACK), inputs)
+                      f"Decay confirmed on {streak} consecutive daily windows; latest "
+                      f"{inputs['window'][0]}..{inputs['window'][1]}: {ch} {_pct(a.rate(what))} vs holdback "
+                      f"{exp['control']} {_pct(b.rate(what))} on {what}, one-sided p < {alpha:.4f} (alpha 0.05 split "
+                      f"over {res['d_max']} checks and 2 metrics).", impact_score, inputs)
 
     # ================================================================== actions that end or shrink a test
     def _abort_arms(self, exp, drop, survivors, data, inputs, minute) -> Action:
@@ -367,15 +407,16 @@ class Experiments:
                       inputs)
 
     def _keep_split(self, exp, minute: int, inputs: dict) -> None:
-        """Inconclusive but ahead, guardrail fine: no change request; the split stays under the daily monitor."""
+        """Inconclusive and not shown worse: no change request; the split stays under the daily monitor."""
         res = json.loads(exp["result_json"])
         res.update(kept_split=True, promoted_minute=minute,
                    d_max=max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS)
         self._save_result(exp, res)
         store.record_decision(self.conn, minute, exp["wf"], "experiment",
-                              "inconclusive; challenger ahead and guardrail fine: keep the split, monitor daily",
+                              "inconclusive; neither proven better nor shown worse: keep the split, monitor daily",
                               inputs, "keep split", experiment_id=exp["id"])
-        self._set(exp, minute, "PROMOTED", "monitoring kept split", {"start_minute": minute, "stage": 3})
+        self._set(exp, minute, "MONITORING_SPLIT", "split kept under monitoring (not a promotion)",
+                  {"start_minute": minute, "stage": 3})
 
     def _finish_conclude(self, exp, then_state: str, minute: int, reason: str) -> None:
         if then_state == "PLANNED_NEXT":
@@ -398,9 +439,11 @@ class Experiments:
                 continue
             target = configs.apply_patch(cur, a.patch)
             route = policy.route_change(spec, cur, target)
-            if len(route) == 2 and a.kind == "rollback":
+            if a.kind == "derisk":              # the one in-policy step toward control, nothing more
                 self._make_draft(wf, [a], "auto", True, minute, kind="derisk", next_state="DERISKED",
                                  patch=_patch_from(route[0][1], a.patch))
+            elif len(route) == 2:               # too big to auto-apply: the full change goes to approval
+                self._make_draft(wf, [a], "approval", True, minute)
             else:
                 self._make_draft(wf, [a], route[0][0], True, minute)
 
@@ -443,7 +486,7 @@ class Experiments:
                 return False, f"experiment {eid} is no longer waiting for this change ({exp['state']})"
             if p["kind"] == "promote":
                 data = self._arm_counts(exp, exp["start_version"])
-                verdict = self.test_promotion(exp, self.specs[exp["wf"]], data)
+                verdict = self.test_promotion(exp, self.specs[exp["wf"]], data, self._recent(exp, minute))
                 if not verdict["promote"]:
                     return False, f"promotion no longer passes on data up to now: {verdict}"
         return True, "still valid"
@@ -477,15 +520,12 @@ class Experiments:
                 res["d_max"] = max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS
                 res["promoted_minute"] = minute
             elif next_state == "DERISKED":
-                cols["derisk_expires"] = minute + settings.DERISK_EXPIRY_MIN
-                res["derisk_version"] = version
+                res["derisk_version"] = version     # the full revert waits for a confirming window
             elif next_state == "PLANNED_NEXT":
                 next_state = "PLANNED"
                 cols.update(arms_json="[]", stage=1)
             self._save_result(exp, res)
             self._set(exp, minute, next_state, f"{p['kind']} applied as v{version}", cols, proposal_id=p["proposal_id"])
-            if next_state == "DERISKED":
-                self._draft_full_revert(self._row(int(eid)), minute, p)
 
     def on_terminal(self, conn, p, state, minute) -> None:
         for eid in json.loads(p["refs_json"])["experiments"]:
@@ -495,13 +535,15 @@ class Experiments:
             prev = pending.get("prev_state", "STAGE1")
             if exp["state"] in TERMINAL:
                 continue
+            if p["kind"] == "rollback":
+                res["revert_requested"] = False                  # a later confirmed signal may ask again
             if state == "REJECTED":
                 if p["kind"] in ("rollback", "derisk"):
                     res["client_kept"] = True                    # client decided: no further auto steps
                     self._save_result(exp, res)
                     self._set(exp, minute, prev,
-                              "rollback rejected: client kept the promoted variant despite decay evidence", {},
-                              proposal_id=p["proposal_id"])
+                              "rollback rejected: client kept the promoted variant despite decay evidence",
+                              {"derisk_expires": None}, proposal_id=p["proposal_id"])
                     store.raise_alert(conn, minute, "summary", exp["wf"],
                                       f"client kept {exp['dim']} promotion despite decay evidence (exp {exp['id']})")
                 else:
@@ -515,7 +557,9 @@ class Experiments:
             self._set(exp, minute, prev, f"{p['kind']} {state.lower()}: re-decide from fresh data", {},
                       proposal_id=p["proposal_id"])
             if prev == "DERISKED" and res.get("revert_redrafts", 0) <= 1 and state in ("EXPIRED", "LAPSED"):
-                self._draft_full_revert(self._row(exp["id"]), minute, p)
+                payload = json.loads(p["payload_json"])
+                self._draft_full_revert(self._row(exp["id"]), minute, payload["impact_score"],
+                                        {"redraft_of": p["proposal_id"]})
 
     # ================================================================== supervisor edits
     def on_supervisor_edit(self, wf: str, dims: list[str], version: int, minute: int) -> None:
@@ -537,13 +581,31 @@ class Experiments:
         self._set(exp, minute, "INVALIDATED", rule, {"end_reason": end_reason})
 
     # ================================================================== de-risk
-    def _draft_full_revert(self, exp, minute: int, parent) -> None:
+    def _recent(self, exp, minute: int) -> dict[str, metrics.Counts]:
+        """Arm counters over the latest RECENT_WINDOW_MIN, same stage version and cohorts as the test."""
+        h = minute // 60
+        return metrics.by_option(self.conn, exp["wf"], exp["dim"], since_hour=h - settings.RECENT_WINDOW_MIN // 60,
+                                 until_hour=h, min_version=exp["start_version"], cohorts=self._cohorts(exp))
+
+    def _derisk_possible(self, exp, spec: dict) -> bool:
+        """True when the full revert is too big to auto-apply but one in-policy step toward control is allowed."""
+        _, cur = configs.current(self.conn, exp["wf"])
+        target = configs.apply_patch(cur, {"allocations": {"default": {exp["dim"]: {exp["control"]: 1.0}}}})
+        return len(policy.route_change(spec, cur, target)) == 2
+
+    def _draft_full_revert(self, exp, minute: int, impact_score: float, analysis: dict) -> None:
+        """Confirmed decay on a de-risked split: the rest of the revert goes to approval. Starts the 48h clock."""
         act = Action("rollback", exp["id"], "ROLLED_BACK",
                      {"allocations": {"default": {exp["dim"]: {exp["control"]: 1.0}}}},
-                     f"Complete rollback of {exp['dim']} to {exp['control']} (de-risk step already applied)",
-                     f"Decay evidence fired; the auto-applied de-risk step cut exposure by "
-                     f"{self.specs[exp['wf']]['governance']['auto_apply']['max_shift']}. The rest needs approval.",
-                     json.loads(parent["payload_json"])["impact_score"], {"parent": parent["proposal_id"]})
+                     f"Complete rollback of {exp['dim']} to {exp['control']} (decay confirmed; exposure already cut)",
+                     f"Decay fired on {settings.DECAY_CONFIRM_WINDOWS} consecutive daily windows. The de-risk step "
+                     f"already cut exposure by {self.specs[exp['wf']]['governance']['auto_apply']['max_shift']}; "
+                     f"the rest needs approval.", impact_score, analysis)
+        res = json.loads(exp["result_json"])
+        res["revert_requested"] = True
+        self._save_result(exp, res)
+        self.conn.execute("UPDATE experiments SET derisk_expires=? WHERE id=?",
+                          (minute + settings.DERISK_EXPIRY_MIN, exp["id"]))
         self._make_draft(exp["wf"], [act], "approval", True, minute, hold_state="DERISKED")
 
     def _check_derisk_expiry(self, wf: str, minute: int) -> None:
@@ -637,7 +699,7 @@ def _transitional(action_kind: str, draft_kind: str) -> str:
     if draft_kind == "derisk":
         return "ROLLING_BACK"
     return {"explore": "STARTING", "advance": "ADVANCING", "promote": "PROMOTING", "conclude": "CONCLUDING",
-            "abort": "ABORTING", "rollback": "ROLLING_BACK"}[action_kind]
+            "abort": "ABORTING", "rollback": "ROLLING_BACK", "derisk": "ROLLING_BACK"}[action_kind]
 
 
 def _arms_after(a: Action, exp: sqlite3.Row) -> list[str]:

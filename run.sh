@@ -15,9 +15,14 @@ command -v "$PY" >/dev/null 2>&1 || PY=python
 # unreachable for longer than the GET retries) is survivable by design: state is checkpointed and every in-flight
 # proposal is reconciled on startup. So restart it, a bounded number of times, rather than end the run early.
 MAX_RESTARTS="${CONTROLLER_MAX_RESTARTS:-5}"
+child=0
+# Forward termination (e.g. a grader's timeout) to the controller, then stop: never restart after a TERM.
+trap 'if [ "$child" -ne 0 ]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" || true; fi; exit 143' TERM INT
 for attempt in $(seq 0 "$MAX_RESTARTS"); do
   code=0
-  "$PY" -m controller.main --url "$SIM_URL" --db "${CONTROLLER_DB:-state/controller.db}" || code=$?
+  "$PY" -m controller.main --url "$SIM_URL" --db "${CONTROLLER_DB:-state/controller.db}" &
+  child=$!
+  wait "$child" || code=$?
   [ "$code" -eq 0 ] && exit 0
   echo "controller exited with $code on attempt $((attempt + 1)) of $((MAX_RESTARTS + 1)); restarting from the checkpoint" >&2
   sleep 2

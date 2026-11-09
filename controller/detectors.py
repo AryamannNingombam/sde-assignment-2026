@@ -47,11 +47,15 @@ def cid_verdict(win: metrics.Counts, hist_matched: metrics.Counts, peers: metric
     elif not has_hist and (has_peers or _enough(wf_matched)):
         z_wf = stats.z_two_prop(win.connected, win.dials, wf_matched.connected, wf_matched.dials) \
             if _enough(wf_matched) else None
-        out["z_vs_workflow"] = _r(z_wf)
-        fire = (has_peers and ratio <= settings.CID_PEER_RATIO_NO_HISTORY) or \
-            (z_wf is not None and z_wf <= settings.CID_SELF_Z)
-        rule = (f"no own history: peer ratio<={settings.CID_PEER_RATIO_NO_HISTORY} OR z vs workflow history"
-                f"<={settings.CID_SELF_Z}")
+        wf_ratio = win.rate("pickup_rate") / wf_matched.rate("pickup_rate") \
+            if _enough(wf_matched) and wf_matched.connected else None
+        out.update(z_vs_workflow=_r(z_wf), ratio_vs_workflow=_r(wf_ratio))
+        # against the workflow norm, as against peers: significant AND materially worse (same pairing as the
+        # with-history branch), so a fine but slightly weaker new number is never rotated out
+        vs_norm = z_wf is not None and z_wf <= settings.CID_SELF_Z and wf_ratio <= settings.CID_PEER_RATIO_NO_HISTORY
+        fire = (has_peers and ratio <= settings.CID_PEER_RATIO_NO_HISTORY) or vs_norm
+        rule = (f"no own history: peer ratio<={settings.CID_PEER_RATIO_NO_HISTORY} OR (z vs workflow history"
+                f"<={settings.CID_SELF_Z} AND ratio vs workflow<={settings.CID_PEER_RATIO_NO_HISTORY})")
     elif has_hist:
         fire = z_self is not None and z_self <= settings.CID_SOLO_Z
         rule = f"solo number: self z<={settings.CID_SOLO_Z}"
@@ -88,15 +92,18 @@ def cid_window(conn: sqlite3.Connection, wf: str, until_hour: int, baseline: tup
         win[did].connected += c
         hours[did].add(hod)
     out = {}
-    wf_hist = {}
-    for did in win:                         # every number's history at these hours = the workflow's norm
-        for hod, h in metrics.by_hour_of_day(conn, wf, "caller_id", did, since_hour=baseline[0],
-                                             until_hour=baseline[1]).items():
-            wf_hist.setdefault(hod, metrics.Counts())
-            wf_hist[hod].dials += h.dials
-            wf_hist[hod].connected += h.connected
+    # one query for the whole baseline: per number and hour of day. The workflow's norm is every number that
+    # dialled in the baseline (not just the ones active now), so it exists even when every active number is new.
+    by_did: dict[str, dict[int, metrics.Counts]] = defaultdict(dict)
+    wf_hist: dict[int, metrics.Counts] = defaultdict(metrics.Counts)
+    for did, hod, d, c in conn.execute(
+            "SELECT caller_id, ((hour % 24) + 24) % 24, SUM(dials), SUM(connected) FROM agg"
+            " WHERE wf=? AND hour>=? AND hour<? GROUP BY 1, 2", (wf, baseline[0], baseline[1])):
+        by_did[did][hod] = metrics.Counts(d, c)
+        wf_hist[hod].dials += d
+        wf_hist[hod].connected += c
     for did, w in win.items():
-        hist = metrics.by_hour_of_day(conn, wf, "caller_id", did, since_hour=baseline[0], until_hour=baseline[1])
+        hist = by_did.get(did, {})
         wf_matched = metrics.Counts()
         for hod in hours[did]:
             if hod in wf_hist:
@@ -288,11 +295,17 @@ def rotate_off(d: dict[str, float], did: str, options: list[str], flagged: set[s
     keep[did] = settings.CID_EXPLORE_SHARE
     proven = [o for o in options if o not in bad and o in evidenced]
     untested = [o for o in options if o not in bad and o not in evidenced]
+    if sum(keep.values()) > settings.MAX_UNTESTED_TOTAL:          # many flagged numbers: one shared watch budget
+        scale = settings.MAX_UNTESTED_TOTAL / sum(keep.values())
+        keep = {o: w * scale for o, w in keep.items()}
     if proven:
         in_use = {o: d[o] for o in proven if d.get(o, 0) > 0}
         weights = in_use or {o: 1.0 for o in proven}
         capped = {o: min(d[o], settings.MAX_UNTESTED_PER_ARM) for o in untested if d.get(o, 0) > 0}
-        room, s = 1 - sum(keep.values()) - sum(capped.values()), sum(weights.values())
+        spare = 1 - sum(keep.values())
+        if sum(capped.values()) > spare / 2:                         # proven numbers keep at least half the room
+            capped = {o: w * (spare / 2) / sum(capped.values()) for o, w in capped.items()}
+        room, s = spare - sum(capped.values()), sum(weights.values())
         out, onto_untested = {**keep, **capped, **{o: room * w / s for o, w in weights.items()}}, False
     elif untested:
         room = 1 - sum(keep.values())

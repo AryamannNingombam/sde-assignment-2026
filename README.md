@@ -219,6 +219,7 @@ what's winning, what we need from you, and what changed in the last 24h.
 | page | `N calls in chunk K reference leads we never saw` | Those calls were skipped so ingest keeps moving. Check whether a chunk was lost or skipped. |
 | page | `engaged flag disagrees with disposition` | The KPI definitions changed upstream. Engagement numbers are suspect until this is fixed. |
 | summary | supervisor edits, caller-ID rotations, rejections, drift, "client kept promotion despite decay" | Goes in the daily summary. Not paged. |
+| summary | `hallucination fix sent beyond the tenant's stated daily request limit` | The one deliberate exception to a client's stated cap (never the policy's). Mention it to the client in the daily summary. |
 
 ### Why did X happen?
 ```bash

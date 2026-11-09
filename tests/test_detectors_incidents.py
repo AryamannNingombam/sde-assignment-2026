@@ -63,3 +63,15 @@ def test_validation_margin_rejects_lucky_runs():
 def test_risky_prompt_filter_matches_whole_words():
     assert _risky("Strict: near-verbatim compliance script")
     assert not _risky("Grounded: benefit claims restricted to policy-schedule fields")
+
+
+def test_new_number_slightly_below_the_norm_is_not_flagged():
+    """Significant but small (z <= -3, ratio 0.9 vs the workflow norm) is not degradation: never rotated out."""
+    v = cid_verdict(c(4000, 970), c(0, 0), None, wf_matched=c(200000, 53800))
+    assert v["z_vs_workflow"] <= -3 and v["ratio_vs_workflow"] > 0.7 and not v["fire"]
+
+
+def test_rotation_never_produces_a_negative_or_unnormalised_allocation():
+    d = {f"D{i}": 1 / 12 for i in range(12)}
+    out, _ = rotate_off(d, "D0", list(d), {f"D{i}" for i in range(1, 11)}, {"D11"})
+    assert min(out.values()) > 0 and abs(sum(out.values()) - 1) < 1e-4 and out["D11"] >= 0.5
