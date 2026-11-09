@@ -90,4 +90,4 @@ Run the controller, stop it with `Ctrl+C`, then run [scripts/crash_recovery.ps1]
 
 ## 10. If this went to production at Formi next month
 
-First, add SQLite audit queries and crash tests. Next, add sequential guardrail tests and automatic rollback. Then enable cohort-level experiments behind a feature flag, run shadow mode, and only after two weeks of clean guardrail data enable auto-apply for caller-ID rotation.
+First, i would add SQLite audit queries and crash tests. Next, sequential guardrail tests and automatic rollback. Then enable cohort-level experiments behind a feature flag, run shadow mode, and only after two weeks of clean guardrail data enable auto-apply for caller-ID rotation.
