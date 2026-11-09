@@ -9,3 +9,11 @@ grade:
 	mkdir -p reports && python -m sim grade --run runs/mine_$(NAME) --baseline runs/base_$(NAME) --out reports/$(NAME).md
 test:
 	python -m pytest -q tests
+scenario:                    # baseline + serve + controller + grade, e.g. make scenario SCENARIO=scenarios/public_02_incidents.yaml
+	python scripts/run_scenario.py $(SCENARIO)
+crash-test:
+	python scripts/crash_test.py
+load-test:
+	python scripts/load_test.py
+detector-fp:
+	python scripts/detector_holdout.py state/public_01_dev.db state/public_02_incidents.db

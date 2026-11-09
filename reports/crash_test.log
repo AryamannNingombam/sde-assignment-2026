@@ -1,0 +1,14 @@
+[16:15:48] CRASH_AT=pending    exit=137 sim at D0 10:00
+[16:15:50] CRASH_AT=approved   exit=137 sim at D0 13:00
+[16:16:04] CRASH_AT=ingest:30  exit=137 sim at D2 12:00
+[16:16:09] external hard kill        exit=-9 sim at D2 22:00
+[16:16:43] final run                 exit=0 sim at D8 00:00
+[16:16:43] simulator finished=True chunks=105
+[16:16:44] nw_renewal: 5 controller versions, duplicate applies=False, missing from store=[]
+[16:16:45] nw_kyc: 2 controller versions, duplicate applies=False, missing from store=[]
+[16:16:45] ks_cancel: 3 controller versions, duplicate applies=False, missing from store=[]
+[16:16:45] submitted proposals stuck mid-flight: []; still pending at scenario end: 0
+[16:16:45] ingest checkpoint 104, simulator last chunk 104
+[16:17:30] calls aggregated 83200 vs calls in the event stream 83200
+[16:17:30] decisions recorded: 126
+[16:17:30] RESULT: PASS

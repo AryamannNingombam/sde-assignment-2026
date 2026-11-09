@@ -176,3 +176,71 @@ thing you cut.
 - If something is ambiguous, **state your assumption in `SUBMISSION.md` and proceed**. Don't wait for an
   answer. Questions are welcome but won't block you.
 - Don't share the assignment or your solution publicly.
+
+---
+
+## 11. The controller: run, operate, debug (on-call)
+
+Design, decisions and results: [SUBMISSION.md](SUBMISSION.md).
+
+### Run
+```bash
+pip install -r requirements.txt
+python -m sim serve --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01 --force   # :8700
+./run.sh http://127.0.0.1:8700                     # runs to the end of the scenario, no manual steps
+python scripts/run_scenario.py scenarios/public_02_incidents.yaml   # baseline + serve + controller + grade
+make test                                          # simulator tests + controller tests
+```
+State is one SQLite file, `state/controller.db` (override with `CONTROLLER_DB`). No other infrastructure.
+
+### Is it healthy?
+`python -m controller.status` prints `state/controller.status.json`, which is rewritten every tick:
+- `ingest.lag_chunks` / `stalled_ticks`: chunks the simulator has that we haven't committed. These should be 0.
+- `ingest.events_per_s`, `loop.decision_pass_ms`, `loop.wall_s_per_sim_day`, `peak_rss_mb`.
+- `proposals_by_state`, `approval_requests_last_24h` (per workflow), `credits` (with the incident reserve).
+- `experiments`, `incidents`, `open_alerts`.
+
+`python -m controller.status --supervisor ks_cancel` is the one-screen client view: what's being tested,
+what's winning, what we need from you, and what changed in the last 24h.
+
+### Alerts (the `alerts` table)
+| severity | message | what to do |
+|---|---|---|
+| page | `ingest stalled for N ticks` | The simulator has chunks we can't commit. Check the controller log for the exception, fix it, and restart. Ingest resumes from `meta.last_chunk`. |
+| page | `simulator returned N consecutive 5xx/connection errors` | Check the simulator. Reads retry on their own. Mutations are reconciled on the next tick. |
+| page | `auto-apply 403 on <proposal> although the local check passed` | `controller/policy.py` disagrees with the server's policy. The change has already fallen back to approval. Fix the local rule. |
+| page | `hallucination incident #N on prompt P` | Informational page. The controller is already validating and proposing a fix. Follow it with `why <wf> --at` or the `incidents` table. |
+| page | `incident #N: no validated fix` / `out of incident credits` | A human has to pick a prompt. Credits are not spent again on that prompt for 24h. |
+| page | `credits below the incident reserve` | Optional spend has already stopped. Check `credit_ops` for what spent them. |
+| page | `<dim> rollback unresolved after 48h at the de-risked split` | The client hasn't answered a rollback. Automation on that dimension is frozen until a human decides. |
+| page | `caller ID X degraded and no healthy number left` | Every number on the workflow is flagged. Ask the client for new numbers. |
+| page | `engaged flag disagrees with disposition` | The KPI definitions changed upstream. Engagement numbers are suspect until this is fixed. |
+| summary | supervisor edits, caller-ID rotations, rejections, drift, "client kept promotion despite decay" | Goes in the daily summary. Not paged. |
+
+### Why did X happen?
+```bash
+python -m controller.why nw_renewal --at "D3 14:00"     # the live version, who changed it, proposal, evidence,
+                                                        # approval, triggering decision, what happened next
+python -m controller.why --lead ks_cancel:l00022500     # each attempt: variant heard, version, and why it was live
+```
+Every evaluation writes a `decisions` row, including no-ops, with its inputs as JSON. `SELECT * FROM decisions
+WHERE wf=? ORDER BY id` is the full story of a workflow.
+
+### After a crash
+Restart the same command. On startup the controller:
+1. checks the store belongs to this simulator world (same scenario, not ahead of it). If not, it archives the
+   store to `*.bak` and starts clean;
+2. ingests every chunk after `meta.last_chunk` (each chunk commits atomically with the checkpoint);
+3. reconciles every in-flight proposal against `GET /approvals` and `config/history` before retrying anything.
+   An intent row is always committed before its HTTP call, so nothing is applied twice or forgotten;
+4. counts any credit call with an unknown outcome as spent. Credit calls are never retried.
+
+`python scripts/crash_test.py` kills the controller 4 times in one run and checks all of the above
+([reports/crash_test.log](reports/crash_test.log)).
+
+### Extending it
+- Every tunable lives in `controller/settings.py`.
+- A new detector or capability is an *owner*: it drafts patches with `governance.draft(...)` and implements
+  `revalidate / on_applied / on_terminal` (see `detectors.py` for the smallest example). Governance handles
+  timing, quota, batching, idempotency and audit.
+- Pure logic (`stats`, `policy`, `configs`, `cohorts`, `kpi`, detector verdicts) is unit-tested in `tests/`.
