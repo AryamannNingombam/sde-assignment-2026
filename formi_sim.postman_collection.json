@@ -1,0 +1,168 @@
+{
+  "info": {
+    "name": "Formi Simulator API",
+    "description": "All endpoints exposed by sim/server.py. Start with: python -m sim serve --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8700" },
+    { "key": "wid", "value": "REPLACE_WORKFLOW_ID" },
+    { "key": "aid", "value": "REPLACE_APPROVAL_ID" },
+    { "key": "chunk", "value": "0" }
+  ],
+  "item": [
+    {
+      "name": "Simulation & Health",
+      "item": [
+        {
+          "name": "Health",
+          "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+        },
+        {
+          "name": "Sim state",
+          "request": { "method": "GET", "url": "{{baseUrl}}/sim/state" }
+        },
+        {
+          "name": "Advance clock",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"minutes\": 60\n}" },
+            "url": "{{baseUrl}}/sim/advance"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "List chunks",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/events/chunks?kind=events&after=-1",
+              "host": ["{{baseUrl}}"],
+              "path": ["events", "chunks"],
+              "query": [
+                { "key": "kind", "value": "events", "description": "events | history" },
+                { "key": "after", "value": "-1" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get chunk (NDJSON)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/events/chunks/{{chunk}}" }
+        }
+      ]
+    },
+    {
+      "name": "Workflows & Config",
+      "item": [
+        {
+          "name": "List workflows",
+          "request": { "method": "GET", "url": "{{baseUrl}}/workflows" }
+        },
+        {
+          "name": "Get workflow",
+          "request": { "method": "GET", "url": "{{baseUrl}}/workflows/{{wid}}" }
+        },
+        {
+          "name": "Get config",
+          "request": { "method": "GET", "url": "{{baseUrl}}/workflows/{{wid}}/config" }
+        },
+        {
+          "name": "Config history",
+          "request": { "method": "GET", "url": "{{baseUrl}}/workflows/{{wid}}/config/history" }
+        },
+        {
+          "name": "Auto-apply config (policy permitting)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"proposal_id\": \"p-001\",\n  \"base_version\": 1,\n  \"proposed_config\": {},\n  \"rationale\": \"Describe why\",\n  \"evidence\": {}\n}"
+            },
+            "url": "{{baseUrl}}/workflows/{{wid}}/config"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Governance",
+      "item": [
+        {
+          "name": "Create approval request",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"workflow_id\": \"{{wid}}\",\n  \"proposal_id\": \"p-001\",\n  \"base_version\": 1,\n  \"proposed_config\": {},\n  \"change_summary\": \"Short summary\",\n  \"diff\": {},\n  \"dry_run\": {},\n  \"rationale\": \"Why this change\",\n  \"affected_leads\": 0,\n  \"impact_score\": 0.0,\n  \"evidence\": {},\n  \"expires_in_hours\": 24\n}"
+            },
+            "url": "{{baseUrl}}/approvals"
+          }
+        },
+        {
+          "name": "List approvals",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/approvals?workflow_id={{wid}}&status=",
+              "host": ["{{baseUrl}}"],
+              "path": ["approvals"],
+              "query": [
+                { "key": "workflow_id", "value": "{{wid}}", "disabled": true },
+                { "key": "status", "value": "", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get approval",
+          "request": { "method": "GET", "url": "{{baseUrl}}/approvals/{{aid}}" }
+        },
+        {
+          "name": "Apply approved proposal",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"approval_id\": \"{{aid}}\"\n}" },
+            "url": "{{baseUrl}}/workflows/{{wid}}/apply"
+          }
+        }
+      ]
+    },
+    {
+      "name": "LLM & Validation (cost credits)",
+      "item": [
+        {
+          "name": "Suggest fixes (3 credits)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"workflow_id\": \"{{wid}}\",\n  \"problem\": \"Describe the hallucination problem\"\n}"
+            },
+            "url": "{{baseUrl}}/llm/suggest-fixes"
+          }
+        },
+        {
+          "name": "Validation run (ceil(n/100) credits)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"workflow_id\": \"{{wid}}\",\n  \"prompt_version\": \"REPLACE_PROMPT_VERSION\",\n  \"n\": 200\n}"
+            },
+            "url": "{{baseUrl}}/validation/runs"
+          }
+        }
+      ]
+    }
+  ]
+}
