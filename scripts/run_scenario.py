@@ -31,10 +31,10 @@ def wait_ready(url: str, timeout: float = 60) -> None:
     raise SystemExit(f"simulator at {url} did not come up")
 
 
-def serve(scenario: str, run_dir: Path, port: int) -> subprocess.Popen:
+def serve(scenario: str, run_dir: Path, port: int, env: dict | None = None) -> subprocess.Popen:
     return subprocess.Popen([sys.executable, "-m", "sim", "serve", "--scenario", scenario, "--run-dir", str(run_dir),
                              "--port", str(port), "--force"], cwd=ROOT, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+                            stderr=subprocess.DEVNULL, env=env)
 
 
 def main() -> None:

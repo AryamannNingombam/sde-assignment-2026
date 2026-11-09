@@ -78,11 +78,22 @@ def mde(p: float, n1: float, n0: float, alpha: float, power: float) -> float:
 
 
 def poisson_upper_p(k: int, lam: float) -> float:
-    """P(X >= k) for X ~ Poisson(lam). Summed in log space so large lam stays stable."""
+    """P(X >= k) for X ~ Poisson(lam), in log space. When k is past the mean the upper tail is summed directly,
+    so very small p-values keep their precision instead of rounding to 0 through 1 - cdf."""
     if k <= 0:
         return 1.0
     if lam <= 0:
         return 0.0
+    if k > lam:
+        log_term = k * math.log(lam) - lam - math.lgamma(k + 1)    # log P(X=k)
+        total, i = 0.0, k
+        while True:
+            term = math.exp(log_term)
+            total += term
+            if term == 0.0 or term < total * 1e-16:      # terms only shrink past the mean
+                return min(1.0, total)
+            i += 1
+            log_term += math.log(lam) - math.log(i)
     log_term = -lam                      # log P(X=0)
     cdf = math.exp(log_term)
     for i in range(1, k):

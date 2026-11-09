@@ -39,9 +39,11 @@ def replay(conn: sqlite3.Connection, wf: str, window: tuple[int, int]) -> dict:
     for day in range(*window):
         for hod in CALL_HOURS:
             h = day * 24 + hod
-            for did, (w, matched, peers) in cid_window(conn, wf, h, baseline=base).items():
-                v = cid_verdict(w, matched, peers)
+            for did, (w, matched, peers, wf_matched) in cid_window(conn, wf, h, baseline=base).items():
+                v = cid_verdict(w, matched, peers, wf_matched)
                 if not v["eligible"]:
+                    streak_cid[did] = 0
+                    flagged.discard(did)
                     continue
                 evaluated["caller_id"] += 1
                 streak_cid[did] = streak_cid.get(did, 0) + 1 if v["fire"] else 0
@@ -52,7 +54,9 @@ def replay(conn: sqlite3.Connection, wf: str, window: tuple[int, int]) -> dict:
                     flagged.discard(did)
             c = metrics.total(conn, wf, since_hour=h - settings.HALLU_WINDOW_MIN // 60, until_hour=h)
             v = hallu_verdict(c.halluc, c.connected, h_base, settings.HALLU_MIN_CONNECTED)
-            if v["eligible"]:
+            if not v["eligible"]:
+                streak_h, hallu_open = 0, False
+            else:
                 evaluated["hallucination"] += 1
                 streak_h = streak_h + 1 if v["fire"] else 0
                 if streak_h >= settings.HALLU_PERSIST and not hallu_open:

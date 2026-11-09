@@ -27,12 +27,25 @@ def test_cid_minimum_n_and_special_cases():
     assert not cid_verdict(c(900, 120), c(0, 0), None)["eligible"]
 
 
-def test_rotation_never_sends_traffic_to_a_flagged_number():
-    out = rotate_off({"D1": 0.95, "D2": 0.05}, "D1", ["D1", "D2", "D3"], flagged={"D2"})
-    assert out == {"D1": 0.05, "D2": 0.05, "D3": 0.9}
-    out = rotate_off({"D1": 0.5, "D2": 0.5}, "D2", ["D1", "D2", "D3"], flagged=set())
-    assert out == {"D1": 0.95, "D2": 0.05}
-    assert rotate_off({"D1": 1.0}, "D1", ["D1"], flagged=set()) is None
+def test_rotation_prefers_evidence_and_never_feeds_a_flagged_number():
+    ev = {"D1", "D2"}
+    out, untested = rotate_off({"D1": 0.5, "D2": 0.5}, "D2", ["D1", "D2", "D3"], set(), ev)
+    assert out == {"D1": 0.95, "D2": 0.05} and not untested           # D3 has no evidence: not used
+    out, untested = rotate_off({"D1": 0.95, "D2": 0.05}, "D1", ["D1", "D2", "D3", "D4"], {"D2"}, ev)
+    assert untested and out == {"D1": 0.05, "D2": 0.05, "D3": 0.45, "D4": 0.45}   # caller must ask approval
+    assert rotate_off({"D1": 1.0}, "D1", ["D1"], set(), {"D1"}) == (None, False)
+
+
+def test_untested_numbers_in_use_are_capped_at_the_exploration_cap():
+    out, untested = rotate_off({"D1": 0.5, "D2": 0.25, "D3": 0.25}, "D1", ["D1", "D2", "D3"], set(), {"D1", "D2"})
+    assert out == {"D1": 0.05, "D2": 0.85, "D3": 0.1} and not untested
+
+
+def test_untested_number_is_held_to_the_workflow_norm():
+    """Review: D4 ran at 17.4% vs a 26.9% workflow norm and nothing fired, because its peers were weak too."""
+    v = cid_verdict(c(400, 70), c(0, 0), c(400, 85), wf_matched=c(20000, 5380))
+    assert v["fire"] and v["z_vs_workflow"] < -3
+    assert not cid_verdict(c(400, 105), c(0, 0), c(400, 100), wf_matched=c(20000, 5380))["fire"]
 
 
 def test_hallucination_poisson_rule():

@@ -26,7 +26,10 @@ def window(spec: dict) -> tuple[int, int]:
 
 
 def next_working(spec: dict, minute: int) -> int:
-    """When the simulated approver would get to a request that becomes due at `minute`."""
+    """When the simulated approver would get to a request that becomes due at `minute`.
+
+    Deliberately the raw `approver_hours`, not `window()`: this predicts the approver's own schedule. The tenant's
+    stated earliest hour only limits when *we* submit, which `can_submit_now` enforces through `window()`."""
     lo, hi = (h * 60 for h in _gov(spec)["approver_hours"])
     day, mod = divmod(minute, MIN_PER_DAY)
     if mod < lo:
@@ -61,12 +64,17 @@ def expires_in_hours(spec: dict, minute: int, urgent: bool) -> float:
     return max(0.25, min(ttl, (hi - minute % MIN_PER_DAY) / 60))   # stale evidence is not approved tomorrow
 
 
-def quota_left(conn: sqlite3.Connection, spec: dict, wf: str, minute: int, urgent: bool) -> int:
-    """Rolling 24h, counted the way the approver counts (every request created). The last slot is reserved."""
+def quota_left(conn: sqlite3.Connection, spec: dict, wf: str, minute: int, urgent: bool,
+               safety_incident: bool = False) -> int:
+    """Rolling 24h, counted the way the approver counts (every request created). The last slot is reserved.
+
+    A tenant's stated cap (stricter than policy) applies to everything except a live safety incident fix, which
+    may use the policy's own limit: a client preference can delay a test, not a fix for customers being misled."""
     used = conn.execute("SELECT COUNT(*) FROM proposals WHERE wf=? AND path='approval' AND submitted_minute IS NOT NULL"
                         " AND submitted_minute > ?", (wf, minute - MIN_PER_DAY)).fetchone()[0]
-    limit = min(_gov(spec)["max_requests_per_24h"],
-                settings.TENANT_MAX_REQUESTS_PER_24H.get(spec.get("tenant_id"), 10**6))
+    limit = _gov(spec)["max_requests_per_24h"]
+    if not safety_incident:
+        limit = min(limit, settings.TENANT_MAX_REQUESTS_PER_24H.get(spec.get("tenant_id"), 10**6))
     cap = limit - (0 if urgent else settings.RESERVED_SLOTS_PER_WF)
     return max(0, cap - used)
 

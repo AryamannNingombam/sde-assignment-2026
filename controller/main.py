@@ -82,30 +82,25 @@ class Controller:
     # ------------------------------------------------------------------ loop
     def run(self, max_ticks: int | None = None) -> None:
         t0 = time.perf_counter()
-        self._ingest()                              # history bootstrap on a fresh store, catch-up on a restart
+        st = self._ingest()                         # history bootstrap on a fresh store, catch-up on a restart
         self.loop_stats["startup_ingest_wall_s"] = round(time.perf_counter() - t0, 1)
         for wf in self.specs:
-            self.governance.reconcile(wf, self._now())
+            self.governance.reconcile(wf, st["sim_minute"])
         ticks = 0
-        while True:
-            minute = self._now()
-            self._decide(minute)
+        while not st["finished"]:
+            self._decide(st["sim_minute"])
             r = self.client.advance(settings.STEP_MINUTES)
-            if r.status == 409 and r.code == "finished":
-                break
-            if r.status is not None and not r.ok:
+            if r.status is not None and not r.ok and r.code != "finished":
                 raise RuntimeError(f"advance failed: {r.status} {r.json}")
-            self._ingest()                          # unknown outcome is fine: catch-up lists chunks by checkpoint
-            st = self.client.state()
+            st = self._ingest()                     # an unknown advance outcome is fine: catch-up uses the checkpoint
             self._track_day(st["sim_minute"])
             ticks += 1
             if st["finished"]:
                 self._decide(st["sim_minute"])
+            elif max_ticks and ticks >= max_ticks:
                 break
-            if max_ticks and ticks >= max_ticks:
-                break
-        self._write_status(self._now(), final=True)
-        log.info("finished at %s", fmt(self._now()))
+        self._write_status(st["sim_minute"], final=True)
+        log.info("finished at %s", fmt(st["sim_minute"]))
 
     def _track_day(self, minute: int) -> None:
         """Wall seconds per simulated day (advance + ingest + decisions): the SRE's headline number."""
@@ -118,19 +113,17 @@ class Controller:
             log.info("simulated day D%s took %.1fs wall", day, walls[f"D{day}"])
             self.day_started = (minute // MIN_PER_DAY, time.perf_counter())
 
-    def _now(self) -> int:
-        st = self.client.state()
-        with store.tx(self.conn):
-            store.set_meta(self.conn, "sim_minute", st["sim_minute"])
-            store.set_meta(self.conn, "credits_remaining", st["credits_remaining"])
-        return st["sim_minute"]
-
-    def _ingest(self) -> None:
+    def _ingest(self) -> dict:
+        """Catch up on chunks, then read /sim/state once: it serves the lag check and the whole next tick."""
         t0 = time.perf_counter()
         chunks = self.ingestor.catch_up()
         events = sum(c.events for c in chunks)
         wall = time.perf_counter() - t0
-        lag = self.client.state()["chunks"] - 1 - store.get_meta(self.conn, "last_chunk", -1)
+        st = self.client.state()
+        with store.tx(self.conn):
+            store.set_meta(self.conn, "sim_minute", st["sim_minute"])
+            store.set_meta(self.conn, "credits_remaining", st["credits_remaining"])
+        lag = st["chunks"] - 1 - store.get_meta(self.conn, "last_chunk", -1)
         self.stalled_ticks = self.stalled_ticks + 1 if lag > 0 else 0
         total = self.loop_stats.setdefault("ingest_total", {"events": 0, "wall_s": 0.0})
         total["events"] += events
@@ -139,26 +132,27 @@ class Controller:
         self.loop_stats["ingest"] = {"chunks": len(chunks), "events": events, "wall_s": round(wall, 3),
                                      "events_per_s": round(events / wall) if wall > 0 and events else 0,
                                      "lag_chunks": lag, "stalled_ticks": self.stalled_ticks}
+        return st
 
     def _decide(self, minute: int) -> None:
         """One decision pass at `minute`. Each part commits on its own; a repeat at the same minute is a no-op."""
         if store.get_meta(self.conn, "decided_minute", -1) >= minute:
-            self.governance.step(minute)            # still drive in-flight proposals
+            self._guarded("governance", self.governance.step, minute)     # still drive in-flight proposals
             return
         t0 = time.perf_counter()
-        self._observe_config_changes(minute)
-        for name, step in (("detectors", self.detectors.step), ("incidents", self.incidents.step),
-                           ("experiments", self.experiments.step)):
+        for name, step in (("config observer", self._observe_config_changes), ("detectors", self.detectors.step),
+                           ("incidents", self.incidents.step), ("experiments", self.experiments.step),
+                           ("governance", self.governance.step)):
             self._guarded(name, step, minute)
-        self.governance.step(minute)
         with store.tx(self.conn):
             store.set_meta(self.conn, "decided_minute", minute)
         self.loop_stats["decision_pass_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         self._write_status(minute)
 
     def _guarded(self, name: str, step, minute: int) -> None:
-        """A bug in one decision module must not stop ingest, governance or the other modules. Its transaction
-        rolls back, the traceback is logged, and on-call is paged with the module name."""
+        """A bug or an exhausted retry in one decision step must not end the run. Its transaction rolls back, the
+        traceback is logged, on-call is paged with the step name, and the loop carries on: governance state is
+        persisted and reconciled, so a skipped step simply runs again next tick."""
         try:
             step(minute)
         except Exception as e:                      # noqa: BLE001 - isolation boundary, re-raised in tests
@@ -171,12 +165,20 @@ class Controller:
                                   f"{name} step failed ({type(e).__name__}: {e}); see controller log")
 
     def _observe_config_changes(self, minute: int) -> None:
+        """React to every version not yet *observed*. Other paths (startup, apply, stale handling) also store new
+        versions, so "stored" is not "observed": a supervisor edit stored by the restart's sync must still
+        invalidate experiments, start the hallucination watch and supersede incidents."""
         for wf in self.specs:
             with store.tx(self.conn):
-                for v in configs.sync(self.conn, self.client, self.clock, wf):
+                configs.sync(self.conn, self.client, self.clock, wf)
+                seen = store.get_meta(self.conn, f"observed_version:{wf}", 0)
+                rows = self.conn.execute("SELECT version, actor, changed_dims, minute FROM config_versions"
+                                         " WHERE wf=? AND version>? ORDER BY version", (wf, seen)).fetchall()
+                for v in rows:
+                    store.set_meta(self.conn, f"observed_version:{wf}", v["version"])
                     if v["actor"] != "supervisor":
                         continue
-                    dims = v["changed_dims"]
+                    dims = json.loads(v["changed_dims"])
                     store.record_decision(self.conn, minute, wf, "supervisor_edit",
                                           "supervisor edit observed: recorded and preserved",
                                           {"version": v["version"], "changed_dims": dims}, "preserve")

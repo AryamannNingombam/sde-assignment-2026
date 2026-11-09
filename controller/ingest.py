@@ -14,12 +14,13 @@ from dataclasses import dataclass, field
 from . import store
 from .clock import Clock, MIN_PER_DAY
 from .cohorts import segment_of
-from .sim_client import SimClient
+from .sim_client import SimClient, SimError
 
 OUTCOME_CODES = {"no_answer": 0, "voicemail": 1, "short_hangup": 2,
                  "concluded_interested": 3, "concluded_not_interested": 4}
 CONCLUDED = ("concluded_interested", "concluded_not_interested")
 LEAD_CACHE_DAYS = 6          # calls only reference campaigns younger than their cadence (<= ~4 days)
+CHUNK_ATTEMPTS = 3           # a stream interrupted mid-chunk is re-read from scratch, never resumed
 
 AGG_UPSERT = """
 INSERT INTO agg(wf, hour, segment, config_version, cohort_id, wm, voice, caller_id, prompt,
@@ -39,6 +40,7 @@ class ChunkStats:
     calls: int = 0
     wall_s: float = 0.0
     mismatches: int = 0          # engaged flag disagreeing with disposition
+    unknown_leads: int = 0       # calls for a lead we never saw: skipped, paged
     max_minute: int | None = None
     by_type: dict = field(default_factory=lambda: defaultdict(int))
 
@@ -70,11 +72,18 @@ class Ingestor:
         if n <= store.get_meta(self.conn, "last_chunk", -1):
             return ChunkStats(n)                                       # already committed
         t0 = time.perf_counter()
-        try:
-            st = self._ingest(n, kind)
-        except BaseException:
-            self._reset_caches()           # caches may hold assignments from the rolled-back transaction
-            raise
+        for attempt in range(1, CHUNK_ATTEMPTS + 1):
+            try:
+                st = self._ingest(n, kind)
+                break
+            except SimError:
+                self._reset_caches()       # partial parse discarded; nothing was committed
+                if attempt == CHUNK_ATTEMPTS:
+                    raise
+                time.sleep(attempt)
+            except BaseException:
+                self._reset_caches()       # caches may hold assignments from the rolled-back transaction
+                raise
         st.wall_s = time.perf_counter() - t0
         return st
 
@@ -90,8 +99,8 @@ class Ingestor:
         new_leads: list[tuple] = []
         campaigns: list[tuple] = []
         uploaded: dict[str, int] = defaultdict(int)
-        concluded_by_campaign: dict[str, int] = defaultdict(int)
-        concluded_leads: list[tuple] = []
+        concluded_campaigns: set[str] = set()
+        concluded_leads: set[int] = set()
         calls_log: list[tuple] = []
         log_calls = self.log_calls and kind == "events"
 
@@ -102,7 +111,11 @@ class Ingestor:
             st.by_type[t] += 1
             if t == "call":
                 st.calls += 1
-                lead_int, seg = self._lead(ev["lead_id"], ev["campaign_id"])
+                hit = self._lead(ev["lead_id"], ev["campaign_id"])
+                if hit is None:
+                    st.unknown_leads += 1
+                    continue
+                lead_int, seg = hit
                 m = minute_of(ev["ts"])
                 v = ev["variant"]
                 disp = ev["disposition"]
@@ -119,8 +132,8 @@ class Ingestor:
                 c[4] += disp == "short_hangup"
                 c[5] += halluc
                 if concluded:
-                    concluded_by_campaign[ev["campaign_id"]] += 1
-                    concluded_leads.append((lead_int,))
+                    concluded_campaigns.add(ev["campaign_id"])
+                    concluded_leads.add(lead_int)
                 if log_calls:
                     vk = (v["welcome_message"], v["voice"], v["caller_id"], v["prompt_version"])
                     code = self.variants.get(vk)
@@ -156,20 +169,25 @@ class Ingestor:
                              " declared_leads) VALUES(?,?,?,?,?)", campaigns)
             conn.executemany("UPDATE campaign_kpi SET uploaded=uploaded+? WHERE campaign_id=?",
                              [(k, cid) for cid, k in uploaded.items()])
-            conn.executemany("UPDATE campaign_kpi SET concluded=concluded+? WHERE campaign_id=?",
-                             [(k, cid) for cid, k in concluded_by_campaign.items()])
-            conn.executemany("UPDATE leads SET concluded=1 WHERE lead_int=?", concluded_leads)
+            conn.executemany("UPDATE leads SET concluded=1 WHERE lead_int=?", [(li,) for li in concluded_leads])
+            # business outcome counts concluded LEADS, so a second concluded call can never push it above 1
+            conn.executemany("UPDATE campaign_kpi SET concluded=(SELECT COUNT(*) FROM leads WHERE campaign_id=?"
+                             " AND concluded=1) WHERE campaign_id=?", [(c, c) for c in concluded_campaigns])
             conn.executemany(AGG_UPSERT, [(*k, *v) for k, v in agg.items()])
             conn.executemany("INSERT INTO calls_log VALUES(?,?,?,?,?,?,?)", calls_log)
             if st.mismatches:
                 store.raise_alert(conn, st.max_minute or 0, "page", None,
                                   f"engaged flag disagrees with disposition on {st.mismatches} calls (chunk {n}); "
                                   "KPI definitions may have changed")
+            if st.unknown_leads:
+                store.raise_alert(conn, st.max_minute or 0, "page", None,
+                                  f"{st.unknown_leads} calls in chunk {n} reference leads we never saw; skipped "
+                                  "so ingest keeps moving (check for a missing chunk)")
             store.set_meta(conn, "last_chunk", n)
         self._evict(st.max_minute)
         return st
 
-    def _lead(self, lead_id: str, campaign_id: str) -> tuple[int, str]:
+    def _lead(self, lead_id: str, campaign_id: str) -> tuple[int, str] | None:
         hit = self.leads.get(lead_id)
         if hit is None:                     # after a restart: load the whole campaign once
             rows = self.conn.execute("SELECT lead_id, lead_int, segment, (SELECT created_minute FROM campaign_kpi"
@@ -180,7 +198,7 @@ class Ingestor:
                 self.leads[lid] = (li, seg)
                 ids.append(lid)
             self.campaign_leads[campaign_id] = (rows[0][3] if rows else 0, ids)
-            hit = self.leads[lead_id]       # KeyError here means a call for a lead we never saw: a real bug
+            hit = self.leads.get(lead_id)   # still None: a call for a lead we never saw
         return hit
 
     def _evict(self, now: int | None) -> None:

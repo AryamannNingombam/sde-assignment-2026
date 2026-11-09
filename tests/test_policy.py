@@ -94,6 +94,10 @@ def test_tenant_cap_is_stricter_than_policy():
     now = parse("D1 12:00")
     assert policy.quota_left(conn, KESTREL, "wf", now, urgent=False) == 0     # 2/day (memo 04) - 1 reserved - 1 used
     assert policy.quota_left(conn, KESTREL, "wf", now, urgent=True) == 1
+    conn.execute("INSERT INTO proposals(proposal_id, wf, path, state, submitted_minute) VALUES('p2', 'wf', 'approval',"
+                 " 'PENDING', ?)", (parse("D1 11:30"),))
+    assert policy.quota_left(conn, KESTREL, "wf", now, urgent=True) == 0                     # preference reached
+    assert policy.quota_left(conn, KESTREL, "wf", now, urgent=True, safety_incident=True) == 2  # policy allows 4
 
 
 def test_apply_patch_rebases_onto_a_moved_config():

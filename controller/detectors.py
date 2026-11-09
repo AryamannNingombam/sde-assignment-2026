@@ -4,7 +4,12 @@ for consecutive windows. Every evaluation with enough data writes a decision row
 - Caller-ID health: a number is degraded only if it is worse than its OWN history at matched hours AND worse
   than its peers right now. A number that was always a bit worse is never flagged.
 - Hallucination spike: one-sided Poisson test on flags in a rolling window vs the prompt's baseline rate.
-- KPI drift: workflow-level primary/guardrail vs history at matched hours. Alerts only, never acts.
+- KPI drift: workflow-level primary/guardrail today vs history at the same hours of day. Alerts only, never acts.
+
+Persistence: windows are 3h and evaluated hourly, so two consecutive evaluations share two of their three hours.
+The persistence rule is a debounce against one noisy hour, not two independent samples; the false-positive
+rate in reports/detector_fp.md was measured with exactly this rule. An evaluation without enough data (e.g.
+overnight) resets the streak, so "consecutive" never spans a gap.
 
 The decision logic is in pure functions (`cid_verdict`, `hallu_verdict`) so `scripts/detector_holdout.py` can
 replay them over history and measure the false-positive rate.
@@ -22,8 +27,12 @@ OWNER = "detectors"
 
 
 # ============================================================================ pure verdicts
-def cid_verdict(win: metrics.Counts, hist_matched: metrics.Counts, peers: metrics.Counts | None) -> dict:
-    """Decide whether one number looks degraded in one window. Returns {'eligible', 'fire', 'rule', ...}."""
+def cid_verdict(win: metrics.Counts, hist_matched: metrics.Counts, peers: metrics.Counts | None,
+                wf_matched: metrics.Counts | None = None) -> dict:
+    """Decide whether one number looks degraded in one window. Returns {'eligible', 'fire', 'rule', ...}.
+
+    `wf_matched` is the whole workflow's history at the same hours. A number without its own history is also held
+    to that norm, so an untested number that is simply bad (not just worse than equally bad peers) is caught."""
     out = {"dials": win.dials, "pickup": _r(win.rate("pickup_rate"))}
     if win.dials < settings.CID_MIN_DIALS:
         return {**out, "eligible": False, "fire": False, "rule": f"n<{settings.CID_MIN_DIALS} dials"}
@@ -35,15 +44,24 @@ def cid_verdict(win: metrics.Counts, hist_matched: metrics.Counts, peers: metric
     if has_hist and has_peers:
         fire = z_self is not None and z_self <= settings.CID_SELF_Z and ratio <= settings.CID_PEER_RATIO
         rule = f"self z<={settings.CID_SELF_Z} AND peer ratio<={settings.CID_PEER_RATIO}"
-    elif has_peers:
-        fire = ratio <= settings.CID_PEER_RATIO_NO_HISTORY
-        rule = f"no own history: peer ratio<={settings.CID_PEER_RATIO_NO_HISTORY}"
+    elif not has_hist and (has_peers or _enough(wf_matched)):
+        z_wf = stats.z_two_prop(win.connected, win.dials, wf_matched.connected, wf_matched.dials) \
+            if _enough(wf_matched) else None
+        out["z_vs_workflow"] = _r(z_wf)
+        fire = (has_peers and ratio <= settings.CID_PEER_RATIO_NO_HISTORY) or \
+            (z_wf is not None and z_wf <= settings.CID_SELF_Z)
+        rule = (f"no own history: peer ratio<={settings.CID_PEER_RATIO_NO_HISTORY} OR z vs workflow history"
+                f"<={settings.CID_SELF_Z}")
     elif has_hist:
         fire = z_self is not None and z_self <= settings.CID_SOLO_Z
         rule = f"solo number: self z<={settings.CID_SOLO_Z}"
     else:
         return {**out, "eligible": False, "fire": False, "rule": "no history and no peers"}
     return {**out, "eligible": True, "fire": bool(fire), "rule": rule}
+
+
+def _enough(c: metrics.Counts | None) -> bool:
+    return c is not None and c.dials >= settings.CID_MIN_HISTORY_DIALS
 
 
 def hallu_verdict(flags: int, connected: int, baseline: float, min_connected: int) -> dict:
@@ -70,8 +88,20 @@ def cid_window(conn: sqlite3.Connection, wf: str, until_hour: int, baseline: tup
         win[did].connected += c
         hours[did].add(hod)
     out = {}
+    wf_hist = {}
+    for did in win:                         # every number's history at these hours = the workflow's norm
+        for hod, h in metrics.by_hour_of_day(conn, wf, "caller_id", did, since_hour=baseline[0],
+                                             until_hour=baseline[1]).items():
+            wf_hist.setdefault(hod, metrics.Counts())
+            wf_hist[hod].dials += h.dials
+            wf_hist[hod].connected += h.connected
     for did, w in win.items():
         hist = metrics.by_hour_of_day(conn, wf, "caller_id", did, since_hour=baseline[0], until_hour=baseline[1])
+        wf_matched = metrics.Counts()
+        for hod in hours[did]:
+            if hod in wf_hist:
+                wf_matched.dials += wf_hist[hod].dials
+                wf_matched.connected += wf_hist[hod].connected
         matched = metrics.Counts()
         for hod in hours[did]:
             h = hist.get(hod)
@@ -83,7 +113,7 @@ def cid_window(conn: sqlite3.Connection, wf: str, until_hour: int, baseline: tup
             if other != did:
                 peers.dials += o.dials
                 peers.connected += o.connected
-        out[did] = (w, matched, peers if peers.dials else None)
+        out[did] = (w, matched, peers if peers.dials else None, wf_matched)
     return out
 
 
@@ -115,11 +145,12 @@ class Detectors:
     # ---------------------------------------------------------------- caller ID
     def _caller_id(self, wf: str, spec: dict, h: int, minute: int) -> None:
         flagged = set(store.get_meta(self.conn, f"cid_flagged:{wf}", []))
-        for did, (w, matched, peers) in sorted(cid_window(self.conn, wf, h).items()):
-            v = cid_verdict(w, matched, peers)
-            if not v["eligible"]:
-                continue
+        for did, (w, matched, peers, wf_matched) in sorted(cid_window(self.conn, wf, h).items()):
+            v = cid_verdict(w, matched, peers, wf_matched)
             key = f"cid_streak:{wf}:{did}"
+            if not v["eligible"]:
+                store.set_meta(self.conn, key, 0)
+                continue
             streak = store.get_meta(self.conn, key, 0) + 1 if v["fire"] else 0
             store.set_meta(self.conn, key, streak)
             if not v["fire"] or did in flagged:
@@ -135,14 +166,17 @@ class Detectors:
 
     def _rotate(self, wf: str, spec: dict, did: str, v: dict, minute: int, flagged: set[str]) -> None:
         _, cur = configs.current(self.conn, wf)
-        patch = {"allocations": {}}
+        evidenced = {o for o, c in metrics.by_option(self.conn, wf, "caller_id").items()
+                     if c.dials >= settings.CID_MIN_HISTORY_DIALS}
+        patch, onto_untested = {"allocations": {}}, False
         for c in configs.cohort_ids(cur):
             d = configs.dist(cur, c, "caller_id")
             if d.get(did, 0) <= settings.CID_EXPLORE_SHARE + 1e-9:
                 continue
-            new = rotate_off(d, did, spec["options"]["caller_id"], flagged)
+            new, untested = rotate_off(d, did, spec["options"]["caller_id"], flagged, evidenced)
             if new:
                 patch["allocations"][c] = {"caller_id": new}
+                onto_untested |= untested
         if not patch["allocations"]:
             store.record_decision(self.conn, minute, wf, "caller_id",
                                   "flagged, but already at exploration share or no healthy number to move to",
@@ -151,15 +185,15 @@ class Detectors:
             return
         self.experiments.invalidate(wf, "caller_id", minute, f"caller-ID health rotation off {did}")
         target = configs.apply_patch(cur, patch)
-        route = policy.route_change(spec, cur, target)
-        harm = (v["hist_pickup"] or 0) - (v["pickup"] or 0)
+        # moving real volume onto numbers with no evidence is never automatic: a human approves it
+        route = [("approval", target)] if onto_untested else policy.route_change(spec, cur, target)
+        harm = (v["hist_pickup"] or v["pickup"] or 0) - (v["pickup"] or 0)
         share = max(configs.dist(cur, c, "caller_id").get(did, 0) for c in configs.cohort_ids(cur))
         payload = {"change_summary": f"Move dials off caller ID {did} (pickup collapsed); keep "
-                                     f"{int(settings.CID_EXPLORE_SHARE * 100)}% on it to see recovery",
-                   "rationale": f"{did} pickup {_pct(v['pickup'])} over the last {settings.CID_WINDOW_MIN // 60}h "
-                                f"(n={v['dials']}) vs its own history {_pct(v['hist_pickup'])} at the same hours "
-                                f"(z={v['z_self']}) and {v['peer_ratio']}x its peers, for {v['streak']} consecutive "
-                                f"windows ({v['rule']}).",
+                                     f"{int(settings.CID_EXPLORE_SHARE * 100)}% on it to see recovery"
+                                     + ("; no number with evidence left, so untested numbers take the volume"
+                                        if onto_untested else ""),
+                   "rationale": cid_rationale(did, v),
                    "impact_score": impact.score_harm_avoided(max(harm, 0), share),
                    "dry_run_extra": {"detector": v}}
         did_id = store.record_decision(self.conn, minute, wf, "caller_id", f"flag {did}: {v['rule']}",
@@ -186,9 +220,10 @@ class Detectors:
         c = metrics.total(self.conn, wf, since_hour=since, until_hour=h, prompt=prompt)
         base, src = hallu_baseline(self.conn, wf, prompt)
         v = hallu_verdict(c.halluc, c.connected, base, settings.HALLU_MIN_CONNECTED)
-        if not v["eligible"]:
-            return
         key = f"hallu_streak:{wf}"
+        if not v["eligible"]:
+            store.set_meta(self.conn, key, 0)
+            return
         streak = store.get_meta(self.conn, key, 0) + 1 if v["fire"] else 0
         store.set_meta(self.conn, key, streak)
         persist = 1 if watching else settings.HALLU_PERSIST
@@ -211,7 +246,7 @@ class Detectors:
     def _drift(self, wf: str, spec: dict, minute: int) -> None:
         day_start = (minute // MIN_PER_DAY) * 24
         today = metrics.total(self.conn, wf, since_hour=day_start, until_hour=minute // 60)
-        hist = metrics.total(self.conn, wf, until_hour=0)
+        hist = metrics.history_before_hour_of_day(self.conn, wf, hour_of_day(minute))   # same hours of day
         g_kpi = next(iter(spec["objective"]["guardrail"])).removesuffix("_max_drop")
         out = {}
         for k in (spec["objective"]["primary"], g_kpi):
@@ -238,19 +273,45 @@ class Detectors:
             store.set_meta(conn, f"cid_flagged:{p['wf']}", flagged)
 
 
-def rotate_off(d: dict[str, float], did: str, options: list[str], flagged: set[str]) -> dict[str, float] | None:
-    """Leave `did` at the exploration share and give the rest to healthy numbers: those already in use, in
-    proportion, or else every unused healthy option evenly. Previously flagged numbers keep at most their
-    exploration share and never receive traffic. None when there is no healthy number to move to."""
+def rotate_off(d: dict[str, float], did: str, options: list[str], flagged: set[str],
+               evidenced: set[str]) -> tuple[dict[str, float] | None, bool]:
+    """Move traffic off `did`, keeping it at the exploration share so recovery stays visible.
+
+    Order of preference: healthy numbers WITH evidence (>= CID_MIN_HISTORY_DIALS dials of their own), in proportion
+    to current use (evenly if none is in use). Untested numbers already in use keep at most MAX_UNTESTED_PER_ARM,
+    the same cap as an untested variant. Flagged numbers never receive traffic. Only when no evidenced healthy
+    number exists does the volume go to untested numbers, evenly; the second return value says so, and the caller
+    then routes the change through approval instead of auto-applying it. (None, False) when there is nowhere to go.
+    """
     bad = flagged | {did}
-    healthy = {o: w for o, w in d.items() if o not in bad and w > 0} or {o: 1.0 for o in options if o not in bad}
-    if not healthy:
-        return None
     keep = {o: min(w, settings.CID_EXPLORE_SHARE) for o, w in d.items() if o in bad and w > 0}
     keep[did] = settings.CID_EXPLORE_SHARE
-    room, s = 1 - sum(keep.values()), sum(healthy.values())
-    out = {**keep, **{o: room * w / s for o, w in healthy.items()}}
-    return {o: round(w, 6) for o, w in sorted(out.items())}
+    proven = [o for o in options if o not in bad and o in evidenced]
+    untested = [o for o in options if o not in bad and o not in evidenced]
+    if proven:
+        in_use = {o: d[o] for o in proven if d.get(o, 0) > 0}
+        weights = in_use or {o: 1.0 for o in proven}
+        capped = {o: min(d[o], settings.MAX_UNTESTED_PER_ARM) for o in untested if d.get(o, 0) > 0}
+        room, s = 1 - sum(keep.values()) - sum(capped.values()), sum(weights.values())
+        out, onto_untested = {**keep, **capped, **{o: room * w / s for o, w in weights.items()}}, False
+    elif untested:
+        room = 1 - sum(keep.values())
+        out, onto_untested = {**keep, **{o: room / len(untested) for o in untested}}, True
+    else:
+        return None, False
+    return {o: round(w, 6) for o, w in sorted(out.items()) if w > 0}, onto_untested
+
+
+def cid_rationale(did: str, v: dict) -> str:
+    """One sentence a supervisor can read; only the comparisons that actually exist are mentioned."""
+    parts = [f"{did} pickup {_pct(v['pickup'])} over the last {settings.CID_WINDOW_MIN // 60}h (n={v['dials']})"]
+    if v.get("z_self") is not None:
+        parts.append(f"vs its own history {_pct(v['hist_pickup'])} at the same hours (z={v['z_self']})")
+    if v.get("z_vs_workflow") is not None:
+        parts.append(f"vs the workflow's history at the same hours (z={v['z_vs_workflow']})")
+    if v.get("peer_ratio") is not None:
+        parts.append(f"{v['peer_ratio']}x the pickup of its peers")
+    return ", ".join(parts) + f"; held for {v['streak']} consecutive hourly windows ({v['rule']})."
 
 
 def _r(x, nd: int = 4):

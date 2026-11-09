@@ -83,11 +83,12 @@ class Incidents:
             inc = self._row(inc["id"])
             ctx = json.loads(inc["context_json"])
             if not ctx["queue"]:
-                if not ctx["suggested"] and self._affordable(inc, settings.SUGGEST_COST):
+                if not ctx["suggested"] and self._affordable(inc, settings.SUGGEST_COST, optional=True):
                     self._suggest(inc, ctx, minute)
                     continue
-                again = next((t for t in ctx["tried"] if t.get("run") and t["run"].get("passes")), None)
-                if again and ctx.get("asks", 0) < settings.INCIDENT_MAX_ASKS:
+                again = next((t for t in ctx["tried"] if t.get("run") and t["run"].get("passes")
+                              and _asks(ctx, t["prompt"]) < settings.INCIDENT_MAX_ASKS), None)
+                if again:
                     with store.tx(self.conn):           # every candidate is exhausted: ask once more, saying so
                         self._event(inc["id"], minute, f"no other candidate; asking again for {again['prompt']}")
                         self._propose(self._row(inc["id"]), again["prompt"], again["run"], minute)
@@ -162,7 +163,8 @@ class Incidents:
         pid = governance.draft(self.conn, minute, inc["wf"], "incident_fix", {"prompt_version": cand}, payload,
                                owner=OWNER, refs={"incident": inc["id"]}, decision_id=did, urgent=True)
         self.conn.execute("UPDATE decisions SET proposal_id=? WHERE id=?", (pid, did))
-        ctx.update(candidate=cand, validation=run, proposal_id=pid, asks=ctx.get("asks", 0) + 1)
+        ctx.update(candidate=cand, validation=run, proposal_id=pid)
+        ctx.setdefault("asks", {})[cand] = _asks(ctx, cand) + 1
         self._save(inc["id"], ctx)
         self.conn.execute("UPDATE incidents SET state='PROPOSED' WHERE id=?", (inc["id"],))
         self._event(inc["id"], minute, f"proposed {cand} as {pid}")
@@ -213,7 +215,7 @@ class Incidents:
         self._save(inc["id"], ctx)
         conn.execute("UPDATE incidents SET state='VERIFYING' WHERE id=?", (inc["id"],))
         store.set_meta(conn, f"hallu_streak:{p['wf']}", 0)
-        self._event(inc["id"], minute, f"fix applied as v{version}; verifying")
+        self._event(inc["id"], minute, f"fix live{f' as v{version}' if version else ''}; verifying")
 
     def on_terminal(self, conn, p, state, minute) -> None:
         inc = self._row(json.loads(p["refs_json"])["incident"])
@@ -224,9 +226,22 @@ class Incidents:
             self._event(inc["id"], minute, f"{p['proposal_id']} rejected ({p['reasons']}); next candidate")
             conn.execute("UPDATE incidents SET state='OPEN' WHERE id=?", (inc["id"],))
             return
-        # expired / lapsed / dropped / stale: the validation is still good, so ask again on the current base
-        self._event(inc["id"], minute, f"{p['proposal_id']} {state.lower()}; re-proposing")
-        self._propose(inc, ctx["candidate"], ctx["validation"], minute)
+        _, cur = configs.current(conn, p["wf"])
+        if cur["prompt_version"] == ctx["candidate"]:        # the fix is live anyway (e.g. a human applied it)
+            self._event(inc["id"], minute, f"{p['proposal_id']} {state.lower()}; {ctx['candidate']} already live")
+            self.on_applied(conn, p, None, minute)
+            return
+        if cur["prompt_version"] != ctx["bad_prompt"]:       # someone else replaced the flagged prompt
+            self._close(inc, "SUPERSEDED", minute, f"flagged prompt {ctx['bad_prompt']} no longer live")
+            return
+        if state != "DROPPED" and _asks(ctx, ctx["candidate"]) < settings.INCIDENT_MAX_ASKS:
+            # expired / lapsed / stale: a non-decision; the validation still holds, ask again on the current base
+            self._event(inc["id"], minute, f"{p['proposal_id']} {state.lower()}; re-proposing")
+            self._propose(inc, ctx["candidate"], ctx["validation"], minute)
+            return
+        self._event(inc["id"], minute, f"{p['proposal_id']} {state.lower()}; asks for {ctx['candidate']} used up,"
+                                       " next candidate")
+        conn.execute("UPDATE incidents SET state='OPEN' WHERE id=?", (inc["id"],))
 
     def on_supervisor_prompt_change(self, wf: str, version: int, minute: int) -> None:
         for inc in self.conn.execute(f"SELECT * FROM incidents WHERE wf=? AND state IN ({_q(ACTIVE)})", (wf,)).fetchall():
@@ -241,9 +256,12 @@ class Incidents:
             " ORDER BY o.id DESC LIMIT 1", (wf, prompt)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def _affordable(self, inc, cost: float) -> bool:
+    def _affordable(self, inc, cost: float, optional: bool = False) -> bool:
+        """Per-incident cap always applies. Optional spend (LLM suggestions, a fallback) must also leave the
+        reserve intact; validating a known candidate is the incident's essential spend and may use the reserve."""
         remaining = store.get_meta(self.conn, "credits_remaining", 0)
-        return inc["credits_spent"] + cost <= settings.CREDIT_CAP_PER_INCIDENT and remaining >= cost
+        floor = store.get_meta(self.conn, "credits_start", 0) * settings.CREDIT_RESERVE_FRAC if optional else 0
+        return inc["credits_spent"] + cost <= settings.CREDIT_CAP_PER_INCIDENT and remaining - cost >= floor
 
     def _credit_op(self, inc, kind: str, request: dict, cost: float, call, minute: int) -> dict | None:
         with store.tx(self.conn):           # intent first: if we die mid-call the cost is counted as spent
@@ -311,6 +329,11 @@ def validation_passes(pass_rate: float, n: int, min_rate: float) -> tuple[bool, 
     lower = pass_rate - settings.VALIDATION_Z * se
     bar = min_rate - settings.VALIDATION_SLACK
     return pass_rate >= min_rate and lower >= bar, f"lower {lower:.4f} vs bar {bar:.4f}"
+
+
+def _asks(ctx: dict, prompt: str) -> int:
+    asks = ctx.get("asks") or {}
+    return asks.get(prompt, 0) if isinstance(asks, dict) else 0
 
 
 def _risky(summary: str) -> bool:

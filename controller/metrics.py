@@ -64,6 +64,13 @@ def total(conn: sqlite3.Connection, wf: str, **kw) -> Counts:
     return by_option(conn, wf, None, **kw).get("*", Counts())
 
 
+def history_before_hour_of_day(conn: sqlite3.Connection, wf: str, hod: int) -> Counts:
+    """History counters restricted to hours of day [0, hod): the matched baseline for a 'today so far' check."""
+    r = conn.execute("SELECT SUM(dials), SUM(connected), SUM(concluded), SUM(halluc) FROM agg"
+                     " WHERE wf=? AND hour<0 AND ((hour % 24) + 24) % 24 < ?", (wf, hod)).fetchone()
+    return Counts(*(x or 0 for x in r))
+
+
 def by_hour_of_day(conn: sqlite3.Connection, wf: str, dim: str, option: str, *, since_hour: int = -10**9,
                    until_hour: int = 0) -> dict[int, Counts]:
     """Baseline counters per hour of day for one option over [since_hour, until_hour) (default: all history)."""

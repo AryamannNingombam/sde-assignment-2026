@@ -193,6 +193,15 @@ class Experiments:
             store.record_decision(self.conn, minute, exp["wf"], "experiment", "stage2 daily harm look: no harm",
                                   inputs, "continue", experiment_id=exp["id"])
         n_req = exp["n_required"]
+        if exp["looks_done"] >= settings.STAGE2_LOOKS:
+            # Every pre-declared look is spent; we are back here because a promotion request didn't land. No new
+            # test: re-propose only if a look already passed AND the result still holds now. Requiring both can only
+            # lower the false-winner rate, so the family-wise alpha stays <= ALPHA.
+            verdict = self.test_promotion(exp, spec, data)
+            inputs = {"stage": 2, "recheck_of_passed_look": res.get("passed_look"), **verdict}
+            if res.get("passed_look") and verdict["promote"]:
+                return self._promote(exp, spec, verdict, inputs, minute)
+            return self._end_inconclusive(exp, spec, data, verdict, inputs, minute)
         look = exp["looks_done"] + 1
         n_min = min(data.get(o, metrics.Counts()).num_den(exp["kpi"])[1] for o in (exp["control"], ch))
         due = n_min >= math.ceil(n_req * look / settings.STAGE2_LOOKS)
@@ -203,16 +212,33 @@ class Experiments:
         verdict = self.test_promotion(exp, spec, data)
         inputs = {"stage": 2, "efficacy_look": look, "of": settings.STAGE2_LOOKS, "n_required": n_req, **verdict}
         if verdict["promote"]:
+            res["passed_look"] = look
+            self._save_result(exp, res)
             return self._promote(exp, spec, verdict, inputs, minute)
         if look >= settings.STAGE2_LOOKS:
-            ahead = (verdict["challenger_rate"] or 0) >= (verdict["control_rate"] or 0)
-            if exp["dim"] in settings.KEEP_SPLIT_WHEN_INCONCLUSIVE and ahead:
-                self._keep_split(exp, minute, inputs)
-                return None
-            return self._conclude(exp, data, inputs, minute, reason="inconclusive at the final look: keep control")
+            return self._end_inconclusive(exp, spec, data, verdict, inputs, minute)
         store.record_decision(self.conn, minute, exp["wf"], "experiment", "stage2 interim look: not yet significant",
                               inputs, "continue", experiment_id=exp["id"])
         return None
+
+    def _end_inconclusive(self, exp, spec, data, verdict: dict, inputs: dict, minute: int) -> Action | None:
+        """Pre-registered (SUBMISSION §5): inconclusive means "not proven better", not "control is better".
+
+        Revert to control only if the challenger's point estimate is not above control, or its guardrail is
+        significantly worse. Otherwise leave the split exactly as it is (no change request) under the daily
+        harm/decay monitor, which rolls it back as soon as there is evidence against it."""
+        ch = verdict["challenger"]
+        g_kpi, _ = _guardrail(spec)
+        a, b = data.get(ch, metrics.Counts()), data.get(exp["control"], metrics.Counts())
+        p_guard = stats.p_less(*a.num_den(g_kpi), *b.num_den(g_kpi))
+        ahead = (verdict["challenger_rate"] or 0) > (verdict["control_rate"] or 0)
+        inputs.update(challenger_ahead=ahead, p_guardrail_worse=_r(p_guard, 6))
+        if ahead and p_guard >= settings.HARM_ALPHA:
+            self._keep_split(exp, minute, inputs)
+            return None
+        why = "challenger not ahead of control" if not ahead else f"guardrail {g_kpi} significantly worse"
+        return self._conclude(exp, data, inputs, minute, reason=f"inconclusive at the final look and {why}: "
+                                                                 "back to control")
 
     def test_promotion(self, exp: sqlite3.Row, spec: dict, data: dict[str, metrics.Counts]) -> dict:
         """Primary one-sided z at alpha* = alpha / looks, plus guardrail non-inferiority. Deterministic."""
@@ -341,13 +367,13 @@ class Experiments:
                       inputs)
 
     def _keep_split(self, exp, minute: int, inputs: dict) -> None:
-        """Inconclusive, challenger not behind: no change request. The split stays under the daily decay monitor."""
+        """Inconclusive but ahead, guardrail fine: no change request; the split stays under the daily monitor."""
         res = json.loads(exp["result_json"])
         res.update(kept_split=True, promoted_minute=minute,
                    d_max=max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS)
         self._save_result(exp, res)
         store.record_decision(self.conn, minute, exp["wf"], "experiment",
-                              "inconclusive; challenger not behind control: keep the screened split, monitor daily",
+                              "inconclusive; challenger ahead and guardrail fine: keep the split, monitor daily",
                               inputs, "keep split", experiment_id=exp["id"])
         self._set(exp, minute, "PROMOTED", "monitoring kept split", {"start_minute": minute, "stage": 3})
 
@@ -367,6 +393,9 @@ class Experiments:
         if routine:
             self._make_draft(wf, routine, "approval", False, minute)
         for a in urgent:                        # harm-reduction: auto where the policy allows, else approval
+            if a.kind == "rollback" and json.loads(self._row(a.exp_id)["result_json"]).get("client_kept"):
+                self._make_draft(wf, [a], "approval", True, minute)     # the client said no once: ask, never step
+                continue
             target = configs.apply_patch(cur, a.patch)
             route = policy.route_change(spec, cur, target)
             if len(route) == 2 and a.kind == "rollback":
@@ -407,6 +436,8 @@ class Experiments:
     def revalidate(self, conn, p, minute) -> tuple[bool, str]:
         for eid in json.loads(p["refs_json"])["experiments"]:
             exp = self._row(int(eid))
+            if exp["state"] in TERMINAL:
+                return False, f"experiment {eid} has ended ({exp['state']}: {exp['end_reason']})"
             pending = json.loads(exp["result_json"]).get("pending") or {}
             if pending.get("proposal_id") != p["proposal_id"] and pending.get("proposal_id") != p["parent_proposal_id"]:
                 return False, f"experiment {eid} is no longer waiting for this change ({exp['state']})"
@@ -490,14 +521,20 @@ class Experiments:
     def on_supervisor_edit(self, wf: str, dims: list[str], version: int, minute: int) -> None:
         for exp in self._rows(wf, RUNNING + TRANSITIONAL):
             if exp["dim"] in dims or "cohorts" in dims:
-                self._set(exp, minute, "INVALIDATED",
-                          f"supervisor edit v{version} changed {dims}: experiment ended, their change preserved",
-                          {"end_reason": "invalidated_by_supervisor"})
+                self._invalidate(exp, minute, f"supervisor edit v{version} changed {dims}: experiment ended, their "
+                                              "change preserved", "invalidated_by_supervisor")
 
     def invalidate(self, wf: str, dim: str, minute: int, reason: str) -> None:
         for exp in self._rows(wf, RUNNING + TRANSITIONAL):
             if exp["dim"] == dim:
-                self._set(exp, minute, "INVALIDATED", reason, {"end_reason": reason})
+                self._invalidate(exp, minute, reason, reason)
+
+    def _invalidate(self, exp, minute: int, rule: str, end_reason: str) -> None:
+        """End the test and forget any request it was waiting on, so that request can never go out later."""
+        res = json.loads(exp["result_json"])
+        res.pop("pending", None)
+        self._save_result(exp, res)
+        self._set(exp, minute, "INVALIDATED", rule, {"end_reason": end_reason})
 
     # ================================================================== de-risk
     def _draft_full_revert(self, exp, minute: int, parent) -> None:

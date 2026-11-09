@@ -147,7 +147,8 @@ class Governance:
             can, why = policy.can_submit_now(spec, minute, urgent)
             if not can:
                 continue
-            if policy.quota_left(self.conn, spec, wf, minute, urgent) <= 0:
+            if policy.quota_left(self.conn, spec, wf, minute, urgent,
+                                 safety_incident=p["kind"] == "incident_fix") <= 0:
                 continue
             payload = json.loads(p["payload_json"])
             body = {
@@ -207,9 +208,10 @@ class Governance:
             self._stale(p, minute)
         elif r.code == "not_approved":
             status = (r.json.get("detail") or {}).get("status")
-            if status == "applied":
-                return                                      # history will show it next reconcile
-            self._finish(p, (status or "LAPSED").upper(), minute, f"apply refused: {r.json}")
+            final = {"lapsed": "LAPSED", "rejected": "REJECTED", "expired": "EXPIRED"}
+            if status in final:
+                self._finish(p, final[status], minute, f"apply refused: {r.json}")
+            # applied: config history shows it on the next reconcile; anything else: not final, reconcile again
         else:
             self._finish(p, "DROPPED", minute, f"apply refused: {r.status} {r.json}")
 

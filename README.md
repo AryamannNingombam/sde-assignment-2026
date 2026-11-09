@@ -189,6 +189,7 @@ pip install -r requirements.txt
 python -m sim serve --scenario scenarios/public_01_dev.yaml --run-dir runs/mine01 --force   # :8700
 ./run.sh http://127.0.0.1:8700                     # runs to the end of the scenario, no manual steps
 python scripts/run_scenario.py scenarios/public_02_incidents.yaml   # baseline + serve + controller + grade
+python scripts/multi_run.py scenarios/public_02_incidents.yaml      # 3 worlds (published + 2 reseeded): result ranges
 make test                                          # simulator tests + controller tests
 ```
 State is one SQLite file, `state/controller.db` (override with `CONTROLLER_DB`). No other infrastructure.
@@ -214,6 +215,8 @@ what's winning, what we need from you, and what changed in the last 24h.
 | page | `credits below the incident reserve` | Optional spend has already stopped. Check `credit_ops` for what spent them. |
 | page | `<dim> rollback unresolved after 48h at the de-risked split` | The client hasn't answered a rollback. Automation on that dimension is frozen until a human decides. |
 | page | `caller ID X degraded and no healthy number left` | Every number on the workflow is flagged. Ask the client for new numbers. |
+| page | `<detectors/incidents/experiments> step failed (...)` | A bug in one decision module. Its transaction rolled back, and ingest, governance and the other modules keep running. Read the traceback in the controller log. |
+| page | `N calls in chunk K reference leads we never saw` | Those calls were skipped so ingest keeps moving. Check whether a chunk was lost or skipped. |
 | page | `engaged flag disagrees with disposition` | The KPI definitions changed upstream. Engagement numbers are suspect until this is fixed. |
 | summary | supervisor edits, caller-ID rotations, rejections, drift, "client kept promotion despite decay" | Goes in the daily summary. Not paged. |
 
@@ -227,7 +230,8 @@ Every evaluation writes a `decisions` row, including no-ops, with its inputs as 
 WHERE wf=? ORDER BY id` is the full story of a workflow.
 
 ### After a crash
-Restart the same command. On startup the controller:
+`run.sh` already restarts the controller up to 5 times (`CONTROLLER_MAX_RESTARTS`) until the scenario finishes;
+the controller exits 0 only when it has. To restart by hand, run the same command. On startup the controller:
 1. checks the store belongs to this simulator world (same scenario, not ahead of it). If not, it archives the
    store to `*.bak` and starts clean;
 2. ingests every chunk after `meta.last_chunk` (each chunk commits atomically with the checkpoint);

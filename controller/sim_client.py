@@ -62,7 +62,12 @@ class SimClient:
             self.server_errors = 0
             if r.status_code >= 400:
                 raise SimError(f"GET {path} -> {r.status_code} {r.text[:200]}")
-            return r.json()
+            try:
+                return r.json()
+            except json.JSONDecodeError:                 # truncated or garbled body: retry like a 5xx
+                last = f"non-JSON body: {r.text[:200]}"
+                self.server_errors += 1
+                continue
         raise SimError(f"GET {path} failed after retries: {last}")
 
     def _mutate(self, method: str, path: str, body: dict) -> Resp:
@@ -98,7 +103,12 @@ class SimClient:
         return self._get("/events/chunks", kind=kind, after=after)
 
     def chunk(self, n: int) -> Iterator[bytes]:
-        """Yields raw NDJSON lines. Streamed, so a 250k-event chunk never sits in memory as text."""
+        """Yields raw NDJSON lines. Streamed, so a 250k-event chunk never sits in memory as text.
+
+        Retries only while nothing has been yielded. A failure after the first line raises SimError instead of
+        restarting the stream, because the caller has already consumed those lines: it must discard its partial
+        work and re-read the whole chunk (Ingestor.ingest_chunk does exactly that)."""
+        yielded = 0
         for backoff in (0, *settings.GET_RETRIES):
             if backoff:
                 time.sleep(backoff)
@@ -112,12 +122,16 @@ class SimClient:
                     for part in r.iter_bytes(1 << 20):
                         buf += part
                         *lines, buf = buf.split(b"\n")
-                        yield from (ln for ln in lines if ln)
+                        for ln in lines:
+                            if ln:
+                                yielded += 1
+                                yield ln
                     if buf:
                         yield buf
                     return
-            except httpx.HTTPError:
-                continue
+            except httpx.HTTPError as e:
+                if yielded:
+                    raise SimError(f"chunk {n} interrupted after {yielded} lines: {e!r}") from e
         raise SimError(f"chunk {n} could not be fetched")
 
     def approval(self, approval_id: str) -> dict:

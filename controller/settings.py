@@ -29,9 +29,6 @@ EXPERIMENT_DIMS = {                 # which levers can move each primary KPI
     "engagement_rate": ("welcome_message", "voice"),
     "pickup_rate": ("caller_id",),
 }
-# An inconclusive confirmation normally returns to control. For caller ID it keeps the harm-screened split under
-# daily monitoring instead: concentrating volume on one number is itself a spam-flag risk.
-KEEP_SPLIT_WHEN_INCONCLUSIVE = ("caller_id",)
 # A "fast" 25/25 exposure profile is deliberately not implemented: it needs a recorded client approval.
 
 # --- caller-ID health (§5, C5)
