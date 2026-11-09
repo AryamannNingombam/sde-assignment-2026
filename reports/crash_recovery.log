@@ -1,0 +1,23 @@
+scenario=scenarios/public_02_incidents.yaml seed=7 gaps=8.0-30.0s max_kills=12
+kill  1: after  15.1s, sim at minute 1410 (2027-01-04T23:30)
+kill  2: after  11.3s, sim at minute 2745 (2027-01-05T21:45)
+kill  3: after  22.3s, sim at minute 5070 (2027-01-07T12:30)
+kill  4: after   9.6s, sim at minute 6225 (2027-01-08T07:45)
+kill  5: after  19.8s, sim at minute 8130 (2027-01-09T15:30)
+kill  6: after  16.0s, sim at minute 9825 (2027-01-10T19:45)
+kill  7: after   9.3s, sim at minute 10965 (2027-01-11T14:45)
+kill  8: after  19.2s, sim at minute 12960 (2027-01-13T00:00)
+kill  9: after   8.8s, sim at minute 14025 (2027-01-13T17:45)
+controller finished normally after 9 kills and 9 restarts
+[PASS] scenario ran to the end: minute 14400
+[PASS] no proposal was applied twice: 17 applied, duplicates: []
+[PASS] no approval was lost: every approval in the simulator is in our store: 15 approvals, missing: []
+[PASS] every applied change is recorded as applied in our store: 17
+[PASS] nothing is recorded as applied that did not happen: 0
+[PASS] no proposal is left half-done: 0
+[PASS] every event ingested exactly once: stream 324338, store 324338
+[PASS] rollups match an independent recount: dials 245032, connected 62237, engaged 33613
+[PASS] our store knows the final config version of every workflow: {'nw_renewal': 8, 'nw_kyc': 3, 'ks_cancel': 11}
+[PASS] learning survived the restarts: {'concluded': 6, 'invalidated': 1}
+audit rows 153; credits used 5.0
+RESULT: PASS
