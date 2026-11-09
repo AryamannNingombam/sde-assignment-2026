@@ -21,10 +21,10 @@
 
 ```
 {
-  "approval_requests": 3,
+  "approval_requests": 4,
   "decisions": {
     "approved": 3,
-    "expired": 0
+    "expired": 1
   },
   "rejection_reasons": {},
   "applied_via_approval": 3,
@@ -80,4 +80,4 @@
 {}
 ```
 
-Credits used: 0 · validation runs: 0 · LLM fix calls: 0
+Credits used: 13 · validation runs: 2 · LLM fix calls: 1

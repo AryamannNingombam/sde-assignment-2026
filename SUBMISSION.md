@@ -4,13 +4,13 @@
 
 ## 0. TL;DR
 
-The controller consumes simulator chunks, keeps restartable statistics, proposes cautious voice changes, and records approval state locally. The latest public runs captured positive engagement lift without harmful applied changes in the final public_02 run. Prompt auto-changes remain disabled because validation safety does not measure engagement.
+The controller consumes simulator chunks, keeps restartable statistics, proposes cautious voice changes, and records approval state locally. The latest public runs captured positive engagement lift without harmful applied changes. Prompt changes are only proposed after a population-level hallucination test and validation evidence, then still pass through approval.
 
 ## 1. Assumptions
 
 1. Event chunks are immutable and event IDs are monotonic.
 2. A controller restart must preserve its last processed chunk and pending approval IDs.
-3. A variant needs at least 80 dials before it is compared.
+3. A variant needs at least 200 dials before it is compared.
 4. A change must show at least a 1 percentage-point observed lift before proposal; initial exploration is capped at 10% outside the incumbent.
 
 ## 2. Scope decisions
@@ -70,14 +70,15 @@ State is written through a temporary file followed by replacement. The chunk cur
 
 | Scenario | Conclusion-rate delta | Engagement delta | Harmful changes | Applied changes |
 |---|---:|---:|---:|---:|
-| public_01_dev | +2.6% | +1.8% | 0 | 2 |
-| public_02_incidents | +0.3% | +1.4% | 0 | 3 |
+| public_01_dev | +5.1% | +0.4% | 0 | 3 |
+| public_02_incidents | +2.1% | +0.3% | 0 | 3 |
+| public_03_load | +0.4% | +0.3% | 0 | 12 |
 
 The final public_02 run used 90% incumbent voice traffic and 10% exploration. Its overall pickup rate was -1.1% versus baseline, so the result is a modest engagement improvement with a guardrail trade-off that should be monitored before production rollout.
 
 ## 7. Scale
 
-The public_03 baseline generated 9,737,439 events in 329.3 seconds and wrote 4.45 GB of output. The full controller run completed without a memory failure; its aggregate result was +0.2% conclusion rate, flat pickup, and +0.1% engagement versus baseline. It applied 10 neutral voice changes, with no harmful changes. The first limit is event-file I/O, not controller policy evaluation. At 10x scale I would partition ingestion by tenant and workflow, use compressed segments, and keep only aggregate statistics in memory.
+The public_03 baseline generated 9,737,439 events in 329.3 seconds and wrote 4.45 GB of output. The full controller run completed without a memory failure; its aggregate result was +0.4% conclusion rate, +0.1% pickup, and +0.3% engagement versus baseline. It applied 12 neutral voice changes, with no harmful changes. The first limit is event-file I/O, not controller policy evaluation. At 10x scale I would partition ingestion by tenant and workflow, use compressed segments, and keep only aggregate statistics in memory.
 
 ## 8. Known weaknesses
 

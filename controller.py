@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import time
 import uuid
@@ -18,18 +19,22 @@ from pathlib import Path
 import httpx
 
 
-MIN_VARIANT_CALLS = 80
-MIN_INCIDENT_CALLS = 40
+MIN_VARIANT_CALLS = 200
+MIN_INCIDENT_CALLS = 150
 MAX_HALLUCINATION_HISTORY = 2000
 EXPLORATION_WEIGHT = 0.20
 ADVANCE_MINUTES = 60
 # Validation is intentionally noisy in the simulator. A 99% pass gate is
 # strict enough to reject unsafe suggestions without making every fix fail.
 MAX_HALLUCINATION_RATE = 0.01
-# Prompt safety validation is noisy and does not measure engagement. Until we
-# have a proper post-apply rollback loop, prompt changes remain manual.
-ALLOW_PROMPT_CHANGES = False
+# Prompt changes are allowed only after the population-level binomial detector
+# fires and the candidate passes validation; they still go through approval.
+ALLOW_PROMPT_CHANGES = True
 MIN_PROMOTION_LIFT = 0.01
+MIN_PROMOTION_Z = 2.0
+HOLDOUT_WEIGHT = 0.15
+CALLER_ID_MIN_DROP = 0.05
+CALLER_ID_Z = 4.0
 
 
 class Controller:
@@ -40,6 +45,7 @@ class Controller:
         self.state.setdefault("last_proposal_minute", {})
         self.state.setdefault("incident_attempted", {})
         self.state.setdefault("voice_promotions", {})
+        self.state.setdefault("promotion_candidates", {})
         self._audit("controller_started", state_file=str(self.state_path))
         self.workflows = {
             item["workflow_id"]: item
@@ -65,7 +71,9 @@ class Controller:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
     def _stats(self, workflow_id: str) -> dict:
-        return self.state["stats"].setdefault(workflow_id, {"dimensions": {}, "hallucinations": []})
+        return self.state["stats"].setdefault(workflow_id, {
+            "dimensions": {}, "hallucinations": [], "hallucination_total": 0, "qa_total": 0,
+        })
 
     def _consume_chunks(self, kind: str, chunks: list[dict]) -> None:
         for chunk in sorted(chunks, key=lambda item: item["chunk"]):
@@ -105,6 +113,10 @@ class Controller:
             bucket["engaged"] += int(engaged)
 
         if connected and "qa" in event:
+            stats["qa_total"] = stats.get("qa_total", 0) + 1
+            stats["hallucination_total"] = stats.get("hallucination_total", 0) + int(
+                bool(event["qa"].get("hallucination_flag"))
+            )
             stats["hallucinations"].append({
                 "flag": bool(event["qa"].get("hallucination_flag")),
                 "minute": event.get("ts"),
@@ -116,10 +128,42 @@ class Controller:
                 del stats["hallucinations"][:-MAX_HALLUCINATION_HISTORY]
 
     @staticmethod
+    def _binomial_tail(successes: int, trials: int, probability: float) -> float:
+        """Exact upper-tail probability without scipy, using log-space terms."""
+        if trials <= 0 or successes <= 0:
+            return 1.0
+        probability = min(max(probability, 1e-9), 1 - 1e-9)
+        tail = 0.0
+        for k in range(successes, trials + 1):
+            log_term = (math.lgamma(trials + 1) - math.lgamma(k + 1) -
+                        math.lgamma(trials - k + 1) + k * math.log(probability) +
+                        (trials - k) * math.log1p(-probability))
+            tail += math.exp(log_term)
+            if tail >= 1.0:
+                return 1.0
+        return min(tail, 1.0)
+
+    @staticmethod
     def _rate(bucket: dict, primary: str) -> float:
         denominator = bucket["connected"] if primary == "engagement_rate" else bucket["dials"]
         numerator = bucket["engaged"] if primary == "engagement_rate" else bucket["connected"]
         return numerator / max(denominator, 1)
+
+    @classmethod
+    def _comparison(cls, left: dict, right: dict, primary: str) -> tuple[float, float]:
+        """Compare two arms with a pooled two-proportion z-test."""
+        if primary == "engagement_rate":
+            lx, ln = left["engaged"], left["connected"]
+            rx, rn = right["engaged"], right["connected"]
+        else:
+            lx, ln = left["connected"], left["dials"]
+            rx, rn = right["connected"], right["dials"]
+        if min(ln, rn) == 0:
+            return 0.0, 0.0
+        lp, rp = lx / ln, rx / rn
+        pooled = (lx + rx) / (ln + rn)
+        se = math.sqrt(max(pooled * (1 - pooled) * (1 / ln + 1 / rn), 1e-12))
+        return lp - rp, (lp - rp) / se
 
     def _best_dimension(self, workflow_id: str, dimension: str, primary: str) -> str | None:
         buckets = self._stats(workflow_id)["dimensions"].get(dimension, {})
@@ -130,7 +174,22 @@ class Controller:
         ]
         if not eligible:
             return None
-        return max(eligible, key=lambda item: self._rate(item[1], primary))[0]
+        eligible.sort(key=lambda item: self._rate(item[1], primary), reverse=True)
+        if len(eligible) == 1:
+            return None
+        lift, z = self._comparison(eligible[0][1], eligible[1][1], primary)
+        if lift < MIN_PROMOTION_LIFT or z < MIN_PROMOTION_Z:
+            self.state["promotion_candidates"].pop(f"{workflow_id}:{dimension}", None)
+            return None
+        key = f"{workflow_id}:{dimension}"
+        previous = self.state["promotion_candidates"].get(key)
+        if previous and previous.get("option") == eligible[0][0]:
+            previous["looks"] += 1
+        else:
+            self.state["promotion_candidates"][key] = {"option": eligible[0][0], "looks": 1}
+        if self.state["promotion_candidates"][key]["looks"] < 2:
+            return None
+        return eligible[0][0]
 
     def _proposal_body(self, workflow_id: str, current: dict, proposed: dict, summary: str) -> dict:
         return {
@@ -156,13 +215,10 @@ class Controller:
     def _propose_best_voice(self, workflow_id: str) -> None:
         if not self._proposal_allowed(workflow_id):
             return
-        if self.state["voice_promotions"].get(workflow_id):
+        if self.state["voice_promotions"].get(workflow_id) == 2:
             return
         workflow = self.workflows[workflow_id]
         objective = workflow["objective"]["primary"]
-        best = self._best_dimension(workflow_id, "voice", objective)
-        if not best:
-            return
         current = self.client.get(f"/workflows/{workflow_id}/config").raise_for_status().json()
         current_config = current["config"]
         old = current_config["allocations"]["default"].get("voice", {})
@@ -182,9 +238,12 @@ class Controller:
                 approval = response.json()
                 self.state["proposals"][workflow_id] = approval["approval_id"]
                 self.state["last_proposal_minute"][workflow_id] = self.now
-                self.state["voice_promotions"][workflow_id] = True
+                self.state["voice_promotions"][workflow_id] = 1
                 self._audit("approval_requested", workflow_id=workflow_id,
                             approval_id=approval["approval_id"], summary=body["change_summary"])
+            return
+        best = self._best_dimension(workflow_id, "voice", objective)
+        if not best:
             return
         if len(old) == 1 and best in old and old[best] >= 1:
             return
@@ -195,10 +254,17 @@ class Controller:
             return
 
         proposed = copy.deepcopy(current_config)
-        proposed["allocations"]["default"]["voice"] = {
-            option: (1 - EXPLORATION_WEIGHT if option == best else EXPLORATION_WEIGHT / max(len(options) - 1, 1))
-            for option in options
-        }
+        incumbent = max(old, key=old.get) if old else best
+        alternatives = [option for option in options if option not in (best, incumbent)]
+        remainder = max(0.0, 1.0 - HOLDOUT_WEIGHT - (0.10 if alternatives else 0.0))
+        proposed["allocations"]["default"]["voice"] = {option: 0.0 for option in options}
+        proposed["allocations"]["default"]["voice"][best] = remainder
+        if incumbent != best:
+            proposed["allocations"]["default"]["voice"][incumbent] = HOLDOUT_WEIGHT
+        if alternatives:
+            each = 0.10 / len(alternatives)
+            for option in alternatives:
+                proposed["allocations"]["default"]["voice"][option] = each
         body = self._proposal_body(workflow_id, current, proposed, f"Promote sampled voice {best}")
         response = self.client.post("/approvals", json=body)
         if response.status_code == 200:
@@ -208,7 +274,7 @@ class Controller:
             self._audit("approval_requested", workflow_id=workflow_id,
                         approval_id=approval["approval_id"],
                         summary=body["change_summary"])
-            self.state["voice_promotions"][workflow_id] = True
+            self.state["voice_promotions"][workflow_id] = 2
 
     def _propose_best_caller_id(self, workflow_id: str) -> None:
         """Rotate away from a clearly underperforming caller ID."""
@@ -225,7 +291,11 @@ class Controller:
         old = cfg["allocations"]["default"].get("caller_id", {})
         current_options = [o for o, w in old.items() if w > 0 and o in buckets]
         current_rate = max((self._rate(buckets[o], "pickup_rate") for o in current_options), default=0)
-        if self._rate(best_bucket, "pickup_rate") - current_rate < MIN_PROMOTION_LIFT:
+        current_option = max(current_options, key=lambda option: self._rate(buckets[option], "pickup_rate"), default=None)
+        if not current_option or current_option == best:
+            return
+        lift, z = self._comparison(best_bucket, buckets[current_option], "pickup_rate")
+        if lift < CALLER_ID_MIN_DROP or z < CALLER_ID_Z:
             return
         proposed = copy.deepcopy(cfg)
         options = workflow["options"]["caller_id"]
@@ -269,7 +339,12 @@ class Controller:
         if len(history) < MIN_INCIDENT_CALLS:
             return
         rate = sum(item["flag"] for item in history) / len(history)
-        if rate <= MAX_HALLUCINATION_RATE:
+        stats = self._stats(workflow_id)
+        old_n = max(stats.get("qa_total", 0) - len(history), 0)
+        old_h = max(stats.get("hallucination_total", 0) - sum(item["flag"] for item in history), 0)
+        baseline = max(old_h / old_n if old_n else MAX_HALLUCINATION_RATE, 0.005)
+        p_value = self._binomial_tail(sum(item["flag"] for item in history), len(history), baseline)
+        if rate <= max(baseline * 2, baseline + 0.03) or p_value >= 1e-6:
             return
         self.state["incident_attempted"][workflow_id] = True
         suggestion = self.client.post(
