@@ -13,6 +13,8 @@ from pathlib import Path
 
 
 def main(argv=None):
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="sim")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve")
@@ -59,7 +61,7 @@ def main(argv=None):
         g = grade(a.run, a.baseline)
         out = json.dumps(g, indent=2, default=dict) if a.json else to_markdown(g)
         if a.out:
-            Path(a.out).write_text(out)
+            Path(a.out).write_text(out, encoding="utf-8")
         print(out)
 
 
