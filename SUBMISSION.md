@@ -10,7 +10,7 @@ Runbook for the on-call engineer: [docs/CONTROLLER.md](docs/CONTROLLER.md). Repo
 
 * A single-process controller ticks every 15 simulated minutes: ingest events into shared per-slice aggregates, detect, experiment, propose through governance, apply, verify, and record why in an append-only decision log.
 * Levers: caller-ID rotation and per-person call hour (auto-applied where the policy allows), welcome/voice experiments with per-slice tests and FDR control, winner holdouts with decay rollback, and hallucination incident response.
-* Results against the no-op baseline, conclusion rate (leads concluded ÷ uploaded): **public_01 +15.7%, public_02 +32.6%**, public_03 **+21.0%** (12 workflows). The naive example gets +1.2% on public_01. No change was graded harmful on any public scenario. The hallucination incident was fixed in 210 minutes for 3 credits. A modified scenario with different truth and policy (`scenarios/robust_check.yaml`) also ran clean: +33.2%.
+* Results against the no-op baseline, conclusion rate (leads concluded ÷ uploaded): **public_01 +15.7%, public_02 +32.6%**, public_03 **+21.8%** (12 workflows). The naive example gets +1.2% on public_01. No change was graded harmful on any public scenario. The hallucination incident was fixed in 210 minutes for 3 credits. A modified scenario with different truth and policy (`scenarios/robust_check.yaml`) also ran clean: +33.2%.
 * Crash test: 7 kills (3 deterministic points inside the dangerous windows, 3 mid-loop exits, 1 SIGKILL), run finishes, every invariant holds.
 * Cut: per-person call time learned from a person's own history, per-tenant credit/attention fairness, a real UI, Postgres. Section 2 says why.
 
@@ -54,7 +54,7 @@ Runbook for the on-call engineer: [docs/CONTROLLER.md](docs/CONTROLLER.md). Repo
 * **Accepted:** one headline number per client (concluded ÷ uploaded); speed where the policy allows it: caller-ID and call-hour changes apply the same day without a human.
 * **Pushed back:** a single blended score (Product constraint: pickup and engagement stay separate); "winner live for everyone by evening" (voice/welcome need a named approval and a statistical bar); the persuasive prompt (P4 hallucinates at 2.5% vs 0.6%; a workflow has exactly one prompt so it cannot even be A/B tested; validation measures safety only).
 * **Wrong claims:** Kestrel's auto-apply is *not* "everything": `ks_cancel` allows schedule, caller_id, welcome_message and voice only, with `max_shift` 0.2, and not prompts or cohorts. Northwind KYC auto-apply is **disabled** in policy (`nw_kyc.auto_apply.enabled=false`); renewal allows only schedule and caller_id.
-* **Reply:** "Nikhil: for the summit I can show one number per client: leads concluded ÷ leads uploaded (+16% and +33% on our two test worlds, +21% at load), with pickup and engagement beside it, not blended. Caller-ID and call-time fixes go live the same day. Voice, welcome and script changes need the client's approval, and Northwind KYC has auto-apply switched off in the signed policy. So 'winner by lunch, live by evening' will read as 'winner proven in days, approved in hours'. I won't ship the persuasive prompt: it hallucinates four times as often as today's."
+* **Reply:** "Nikhil: for the summit I can show one number per client: leads concluded ÷ leads uploaded (+16% and +33% on our two test worlds, +22% at load), with pickup and engagement beside it, not blended. Caller-ID and call-time fixes go live the same day. Voice, welcome and script changes need the client's approval, and Northwind KYC has auto-apply switched off in the signed policy. So 'winner by lunch, live by evening' will read as 'winner proven in days, approved in hours'. I won't ship the persuasive prompt: it hallucinates four times as often as today's."
 
 ### 02 Compliance (Meera Iyer, Northwind)
 * **Accepted:** voice/welcome/script changes only with a named human approval (even where auto-apply would be permitted); script changes carry a validation run id; requests sent only inside approver hours (renewal 10–19, KYC 10–18), never at night; larger control share on Northwind (≥65%) while experimenting.
@@ -66,7 +66,7 @@ Runbook for the on-call engineer: [docs/CONTROLLER.md](docs/CONTROLLER.md). Repo
 ### 03 Platform/SRE (Kabir Menon)
 * **Accepted:** kill/restart test (shown); idempotency everywhere; actionable alerts only; loop health without logs; a load figure.
 * **Pushed back:** none on the non-negotiables. On "no new stateful infra": SQLite is a file, not a service, but a recycled node loses it unless it lives on a persistent volume. The store SQL is portable to Postgres, which he already runs; that is the production answer.
-* **Reply:** "Kabir: I killed the controller 7 times in one run (3 at the exact points between 'sent' and 'recorded', 3 mid-loop, 1 SIGKILL); it finished with no double apply and no lost approval (reports/crash_recovery.log). One public_03 simulated day ingests in about 5 seconds on this laptop (185k events/s); the per-tick decision time is p50 0.03 s, p99 0.65 s. State is one SQLite file: put it on a persistent volume or tell me and I'll point the same schema at your Postgres. Pages: hallucination spike, no validated fix, failed fix, low credits. Everything else is a ticket."
+* **Reply:** "Kabir: I killed the controller 7 times in one run (3 at the exact points between 'sent' and 'recorded', 3 mid-loop, 1 SIGKILL); it finished with no double apply and no lost approval (reports/crash_recovery.log). One public_03 simulated day ingests in about 5 seconds on this laptop (173k events/s); the per-tick decision time is p50 0.03 s, p99 0.73 s. State is one SQLite file: put it on a persistent volume or tell me and I'll point the same schema at your Postgres. Pages: hallucination spike, no validated fix, failed fix, low credits. Everything else is a ticket."
 
 ### 04 Client ops supervisor (Anita Desai, Kestrel)
 * **Accepted:** at most 2 requests/day (I send one routine request and keep a slot for incidents), never before 11:00, one request per day carrying every change; her edits are never reverted silently: the controller adopts them as the new baseline and holds those dimensions for 2 days; compliance-script-style prompts (P5) are ranked last when picking a fix; a one-screen view.
@@ -135,12 +135,12 @@ Measured on public_03 (12 workflows, about 650k dials/day, 4-vCPU-class laptop, 
 
 | metric | value |
 |---|---|
-| events ingested (7 history days + 5 days) | 9.74M in 52.7 s = **185k events/s** (fetch + parse + aggregate + SQLite commit) |
+| events ingested (7 history days + 5 days) | 9.74M in 56.3 s = **173k events/s** (fetch + parse + aggregate + SQLite commit) |
 | one simulated day (about 850k events) | about 5 s to ingest |
-| decision time per 15-min tick, all 12 workflows | p50 0.03 s, p99 0.65 s, max 1.4 s (the 08:15 call-hour assignment) |
-| peak RSS | 965 MB |
+| decision time per 15-min tick, all 12 workflows | p50 0.03 s, p99 0.73 s, max 1.6 s (the 08:15 call-hour assignment) |
+| peak RSS | 995 MB |
 | wall-clock, 5 simulated days incl. the simulator | about 6 min, far under the 10 min/day target |
-| outcome | conclusion +21.0%, pickup +13.1%, engagement +4.9%; 115 changes, 0 harmful |
+| outcome | conclusion +21.8%, pickup +13.7%, engagement +4.9%; 114 changes, 0 harmful |
 
 Ingest rate swung between 15k and 185k events/s across runs depending on what else was using the machine, so treat it as "tens to a couple of hundred thousand per second", and quote the high end only on an idle box. One workflow (`nort_kyc_1`) gained only +1.0% because three consecutive random "judgement call" rejections (15% each) delayed its first change to day 3; the controller re-planned each time and never resent a rejected request.
 
