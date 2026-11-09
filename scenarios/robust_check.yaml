@@ -1,0 +1,315 @@
+credits: 200
+days: 10
+did_l0_per_dph: 30
+did_tau_days: 2
+effects:
+- dim: voice
+  mult: 1.25
+  value: V3
+  where:
+    age_band:
+    - 31-45
+  workflow: nw_renewal
+- dim: welcome_message
+  mult: 1.2
+  value: W2
+  where:
+    lang:
+    - te
+    - kn
+  workflow: nw_renewal
+- dim: voice
+  mult: 0.85
+  value: V2
+  workflow: nw_renewal
+- decay:
+    after_exposure_days: 2
+    over_days: 2
+    to_mult: 0.85
+  dim: welcome_message
+  mult: 1.12
+  value: W2
+  workflow: nw_kyc
+- dim: voice
+  mult: 1.18
+  value: V4
+  where:
+    city_tier:
+    - '1'
+  workflow: ks_cancel
+history_days: 14
+incidents:
+- at: D1 12:00
+  base_health: 0.3
+  did: D1
+  type: did_flagged
+  workflow: nw_kyc
+- at: D2 10:30
+  note: persuasive prompt
+  patch:
+    prompt_version: P4
+  type: supervisor_edit
+  workflow: nw_renewal
+- at: D4 14:00
+  patch:
+    allocations:
+      default:
+        welcome_message:
+          W2: 1
+  type: supervisor_edit
+  workflow: ks_cancel
+name: robust_check
+prompts:
+  P1:
+    engage_mult: 1.0
+    halluc: 0.006
+    summary: Current production prompt
+  P2:
+    engage_mult: 0.93
+    halluc: 0.055
+    summary: 'Supervisor edit: adds payment-urgency language and benefit claims'
+  P3:
+    engage_mult: 1.03
+    halluc: 0.004
+    summary: 'Grounded: benefit claims restricted to policy-schedule fields; tighter
+      objection handling'
+  P4:
+    engage_mult: 1.06
+    halluc: 0.025
+    summary: 'Persuasive: freer objection handling and richer benefit explanations'
+  P5:
+    engage_mult: 0.86
+    halluc: 0.003
+    summary: 'Strict: near-verbatim compliance script'
+seed: 909
+tenants:
+- id: northwind_life
+  workflows:
+  - base_engage: 0.55
+    base_pickup: 0.3
+    cadence:
+    - 2
+    - 3
+    - 3
+    daily_batch:
+      at_hour: 8
+      returning_share: 0.4
+      size: 1100
+    default_config:
+      allocations:
+        default:
+          caller_id:
+            D1: 0.5
+            D2: 0.5
+          voice:
+            V1: 1
+          welcome_message:
+            W1: 1
+      prompt_version: P1
+    dialling_window:
+    - 9
+    - 21
+    dials_per_hour: 300
+    did_base_health: {}
+    governance:
+      apply_window_hours: 2
+      approver_hours:
+      - 10
+      - 19
+      approver_latency_minutes:
+      - 30
+      - 240
+      auto_apply:
+        allowed_dims:
+        - schedule
+        - caller_id
+        enabled: true
+        max_shift: 0.5
+      base_reject_rate: 0.1
+      max_requests_per_24h: 3
+      min_validation_pass_rate: 0.97
+      proposal_ttl_hours: 24
+    id: nw_renewal
+    language_mix:
+      en: 0.2
+      hi: 0.3
+      kn: 0.1
+      mr: 0.1
+      ta: 0.15
+      te: 0.15
+    mid_flight: allowed
+    objective:
+      guardrail:
+        pickup_rate_max_drop: 0.02
+      primary: engagement_rate
+    options:
+      caller_id:
+      - D1
+      - D2
+      - D3
+      - D4
+      prompt_version:
+      - P1
+      - P3
+      - P4
+      - P5
+      voice:
+      - V1
+      - V2
+      - V3
+      - V4
+      welcome_message:
+      - W1
+      - W2
+      - W3
+    use_case: life-insurance renewal premium reminder (persistency)
+  - base_engage: 0.6
+    base_pickup: 0.34
+    cadence:
+    - 2
+    - 2
+    - 3
+    daily_batch:
+      at_hour: 8
+      returning_share: 0.2
+      size: 700
+    default_config:
+      allocations:
+        default:
+          caller_id:
+            D1: 1
+          voice:
+            V1: 1
+          welcome_message:
+            W1: 1
+      prompt_version: P1
+    dialling_window:
+    - 10
+    - 20
+    dials_per_hour: 200
+    did_base_health:
+      D2: 0.6
+    governance:
+      apply_window_hours: 2
+      approver_hours:
+      - 10
+      - 18
+      approver_latency_minutes:
+      - 60
+      - 480
+      auto_apply:
+        allowed_dims:
+        - schedule
+        - caller_id
+        - prompt_version
+        enabled: true
+        max_shift: 0.3
+      base_reject_rate: 0.15
+      max_requests_per_24h: 2
+      proposal_ttl_hours: 24
+    id: nw_kyc
+    language_mix:
+      en: 0.6
+      hi: 0.4
+    mid_flight: next_campaign_only
+    objective:
+      guardrail:
+        engagement_rate_max_drop: 0.02
+      primary: pickup_rate
+    options:
+      caller_id:
+      - D1
+      - D2
+      - D3
+      prompt_version:
+      - P1
+      - P3
+      voice:
+      - V1
+      - V2
+      welcome_message:
+      - W1
+      - W2
+    use_case: KYC document reminder for new policies
+- id: kestrel_finance
+  workflows:
+  - base_engage: 0.5
+    base_pickup: 0.28
+    cadence:
+    - 2
+    - 2
+    - 2
+    daily_batch:
+      at_hour: 8
+      returning_share: 0.3
+      size: 1500
+    default_config:
+      allocations:
+        default:
+          caller_id:
+            D1: 0.5
+            D2: 0.5
+          voice:
+            V1: 1
+          welcome_message:
+            W1: 1
+      prompt_version: P1
+    dialling_window:
+    - 9
+    - 21
+    dials_per_hour: 400
+    governance:
+      apply_window_hours: 2
+      approver_hours:
+      - 9
+      - 17
+      approver_latency_minutes:
+      - 20
+      - 120
+      auto_apply:
+        allowed_dims:
+        - schedule
+        - caller_id
+        - welcome_message
+        - voice
+        enabled: true
+        max_shift: 0.2
+      base_reject_rate: 0.05
+      max_requests_per_24h: 4
+      proposal_ttl_hours: 8
+    id: ks_cancel
+    language_mix:
+      en: 0.2
+      hi: 0.6
+      kn: 0.2
+    mid_flight: allowed
+    objective:
+      guardrail:
+        engagement_rate_max_drop: 0.02
+      primary: pickup_rate
+    options:
+      caller_id:
+      - D1
+      - D2
+      - D3
+      prompt_version:
+      - P1
+      - P2
+      - P3
+      - P4
+      - P5
+      voice:
+      - V1
+      - V2
+      - V3
+      - V4
+      welcome_message:
+      - W1
+      - W2
+      - W3
+    tier_mix:
+    - 0.5
+    - 0.3
+    - 0.2
+    use_case: consumer-loan cancellation reconfirmation
+tick_minutes: 15

@@ -1,0 +1,654 @@
+{
+ "as_of": "D4 23:45",
+ "workflows": {
+  "nort_renewal_0": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.291,
+    "engagement_rate": 0.5909
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2847,
+    "engagement_rate": 0.5431
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=60+": "V3"
+     },
+     "stopped_arms": {
+      "V3": [
+       "age_band=18-30"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=18-30": "W3",
+      "age_band=31-45": "W3",
+      "age_band=46-60": "W3",
+      "age_band=60+": "W3"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 36524 active leads (model-expected pickup +15.0%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "nort_renewal_0.v12.aefde390c4.a0 applied as v13 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "nort_kyc_1": {
+   "primary_kpi": "pickup_rate",
+   "guardrail": {
+    "engagement_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2394,
+    "engagement_rate": 0.593
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2637,
+    "engagement_rate": 0.591
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 2,
+     "winning": {
+      "all=all": "V2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 2,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 15:30",
+     "kind": "applied",
+     "what": "nort_kyc_1.v3.9226079579.a0 applied as v4 (approval)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "nort_cancel_2": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2741,
+    "engagement_rate": 0.5335
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2621,
+    "engagement_rate": 0.4996
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=18-30": "V4",
+      "age_band=31-45": "V4"
+     },
+     "stopped_arms": {
+      "V2": [
+       "all=all"
+      ],
+      "V3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=31-45": "W2",
+      "age_band=46-60": "W2"
+     },
+     "stopped_arms": {
+      "W3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 38845 active leads (model-expected pickup +14.0%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "nort_cancel_2.v12.cb5363637f.a0 applied as v13 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "kest_renewal_0": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2918,
+    "engagement_rate": 0.5903
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2818,
+    "engagement_rate": 0.5483
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=60+": "V3"
+     },
+     "stopped_arms": {
+      "V3": [
+       "age_band=18-30"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=18-30": "W3",
+      "age_band=31-45": "W3",
+      "age_band=46-60": "W3",
+      "age_band=60+": "W3"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 36434 active leads (model-expected pickup +14.2%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "kest_renewal_0.v12.ba98620d68.a0 applied as v13 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "kest_kyc_1": {
+   "primary_kpi": "pickup_rate",
+   "guardrail": {
+    "engagement_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.3137,
+    "engagement_rate": 0.6495
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.264,
+    "engagement_rate": 0.5952
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "lang=en": "V2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 18:00",
+     "kind": "applied",
+     "what": "kest_kyc_1.v5.b6930f2c84.a0 applied as v6 (approval)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "kest_cancel_2": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2742,
+    "engagement_rate": 0.5328
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2631,
+    "engagement_rate": 0.4979
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=18-30": "V4",
+      "age_band=31-45": "V4"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {
+      "W3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 38765 active leads (model-expected pickup +11.9%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "kest_cancel_2.v11.99b334977c.a0 applied as v12 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "arav_renewal_0": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2924,
+    "engagement_rate": 0.5878
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2826,
+    "engagement_rate": 0.546
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=60+": "V3"
+     },
+     "stopped_arms": {
+      "V3": [
+       "age_band=18-30"
+      ],
+      "V4": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=18-30": "W3",
+      "age_band=31-45": "W3",
+      "age_band=46-60": "W3",
+      "age_band=60+": "W3"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 36570 active leads (model-expected pickup +14.9%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "arav_renewal_0.v13.7a9b385c8b.a0 applied as v14 (auto)"
+    },
+    {
+     "at": "D4 12:00",
+     "kind": "applied",
+     "what": "arav_renewal_0.v14.54424c0fcd.a0 applied as v15 (approval)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "arav_kyc_1": {
+   "primary_kpi": "pickup_rate",
+   "guardrail": {
+    "engagement_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.3129,
+    "engagement_rate": 0.6396
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2646,
+    "engagement_rate": 0.5973
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "V2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 16:15",
+     "kind": "applied",
+     "what": "arav_kyc_1.v5.a02f56c2b0.a0 applied as v6 (approval)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "arav_cancel_2": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2738,
+    "engagement_rate": 0.5321
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2635,
+    "engagement_rate": 0.4999
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "city_tier=1": "V4",
+      "city_tier=2": "V4"
+     },
+     "stopped_arms": {
+      "V2": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {
+      "W3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 38869 active leads (model-expected pickup +13.9%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "arav_cancel_2.v12.72152406ce.a0 applied as v13 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "tide_renewal_0": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2936,
+    "engagement_rate": 0.5984
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2823,
+    "engagement_rate": 0.548
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 2,
+     "winning": {
+      "age_band=46-60": "V4",
+      "age_band=60+": "V3"
+     },
+     "stopped_arms": {
+      "V3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 2,
+     "winning": {
+      "age_band=18-30": "W3",
+      "age_band=31-45": "W3",
+      "age_band=46-60": "W3",
+      "age_band=60+": "W3"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 37251 active leads (model-expected pickup +13.0%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "tide_renewal_0.v11.6b070f9e26.a0 applied as v12 (auto)"
+    },
+    {
+     "at": "D4 12:45",
+     "kind": "applied",
+     "what": "tide_renewal_0.v12.ec1e7fad72.a0 applied as v13 (approval)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "tide_kyc_1": {
+   "primary_kpi": "pickup_rate",
+   "guardrail": {
+    "engagement_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.3056,
+    "engagement_rate": 0.6505
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2646,
+    "engagement_rate": 0.5969
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "V2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 12:15",
+     "kind": "applied",
+     "what": "tide_kyc_1.v4.7244cc4f4a.a0 applied as v5 (approval)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "tide_cancel_2": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2735,
+    "engagement_rate": 0.5318
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2627,
+    "engagement_rate": 0.4996
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "V4"
+     },
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {
+      "all=all": "W2"
+     },
+     "stopped_arms": {
+      "W3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D4 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 38858 active leads (model-expected pickup +12.7%)"
+    },
+    {
+     "at": "D4 08:15",
+     "kind": "applied",
+     "what": "tide_cancel_2.v12.8156f8f631.a0 applied as v13 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  }
+ },
+ "loop_health": {
+  "ingest_lag_sim_minutes": 167.0,
+  "decide_seconds_last_tick": 0.03154897689819336,
+  "decisions_last_sim_hour": 0,
+  "credits_remaining": 400.0,
+  "credits_spent_by_controller": 0,
+  "open_proposals": 0
+ }
+}
