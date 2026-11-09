@@ -1,0 +1,53 @@
+# Everything through Docker:
+#   docker compose up --build                       # simulator + controller (+ DB web UI), scenario public_01_dev
+#   SCENARIO=public_02_incidents docker compose up --build
+# Controller state lives in the named volume `ctrl_state` (SQLite file /state/controller.db).
+services:
+  sim:
+    build: .
+    container_name: ctrl-sim
+    command: ["python", "-m", "sim", "serve", "--scenario", "scenarios/${SCENARIO:-public_01_dev}.yaml",
+              "--run-dir", "/runs/${RUN_NAME:-mine}", "--host", "0.0.0.0", "--port", "8700", "--force"]
+    ports:
+      - "8700:8700"
+    volumes:
+      - ./runs:/runs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8700/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  controller:
+    build: .
+    container_name: ctrl-controller
+    depends_on:
+      sim:
+        condition: service_healthy
+    command: ["./run.sh", "http://sim:8700"]
+    environment:
+      CTRL_STATE_DIR: /state
+      CTRL_HTTP_PORT: "9100"          # /healthz /readyz /metrics
+      CTRL_ALERT_WEBHOOK: "${CTRL_ALERT_WEBHOOK:-}"
+    ports:
+      - "9100:9100"
+    volumes:
+      - ctrl_state:/state
+    stop_grace_period: 30s            # SIGTERM = finish the current tick, then exit
+    restart: on-failure               # a crash restarts the controller; reconcile() resumes it
+
+  # SQLite is an embedded file (no server), so this is a read-only web UI over the controller's DB file.
+  sqlite-web:
+    image: coleifer/sqlite-web
+    container_name: ctrl-sqlite
+    profiles: ["tools"]               # docker compose --profile tools up sqlite-web
+    ports:
+      - "8080:8080"
+    volumes:
+      - ctrl_state:/data   # rw: SQLite WAL needs -shm; the UI itself is read-only (-x)
+    environment:
+      SQLITE_DATABASE: controller.db
+    command: ["sqlite_web", "-H", "0.0.0.0", "-x", "/data/controller.db"]
+
+volumes:
+  ctrl_state:
