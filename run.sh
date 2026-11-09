@@ -16,8 +16,11 @@ command -v "$PY" >/dev/null 2>&1 || PY=python
 # proposal is reconciled on startup. So restart it, a bounded number of times, rather than end the run early.
 MAX_RESTARTS="${CONTROLLER_MAX_RESTARTS:-5}"
 child=0
-# Forward termination (e.g. a grader's timeout) to the controller, then stop: never restart after a TERM.
-trap 'if [ "$child" -ne 0 ]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" || true; fi; exit 143' TERM INT
+# Forward termination (e.g. a grader's timeout) to the controller, then stop: never restart after a TERM/INT.
+# Exit with the conventional 128+signal code: 143 for TERM, 130 for INT.
+stop() { if [ "$child" -ne 0 ]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" || true; fi; exit "$1"; }
+trap 'stop 143' TERM
+trap 'stop 130' INT
 for attempt in $(seq 0 "$MAX_RESTARTS"); do
   code=0
   "$PY" -m controller.main --url "$SIM_URL" --db "${CONTROLLER_DB:-state/controller.db}" &

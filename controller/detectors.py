@@ -52,7 +52,8 @@ def cid_verdict(win: metrics.Counts, hist_matched: metrics.Counts, peers: metric
         out.update(z_vs_workflow=_r(z_wf), ratio_vs_workflow=_r(wf_ratio))
         # against the workflow norm, as against peers: significant AND materially worse (same pairing as the
         # with-history branch), so a fine but slightly weaker new number is never rotated out
-        vs_norm = z_wf is not None and z_wf <= settings.CID_SELF_Z and wf_ratio <= settings.CID_PEER_RATIO_NO_HISTORY
+        vs_norm = z_wf is not None and wf_ratio is not None and z_wf <= settings.CID_SELF_Z \
+            and wf_ratio <= settings.CID_PEER_RATIO_NO_HISTORY
         fire = (has_peers and ratio <= settings.CID_PEER_RATIO_NO_HISTORY) or vs_norm
         rule = (f"no own history: peer ratio<={settings.CID_PEER_RATIO_NO_HISTORY} OR (z vs workflow history"
                 f"<={settings.CID_SELF_Z} AND ratio vs workflow<={settings.CID_PEER_RATIO_NO_HISTORY})")

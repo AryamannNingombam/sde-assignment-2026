@@ -202,24 +202,31 @@ completed, so a restart within the same minute doesn't double-count detector win
   the latest 24h window not to show the challenger behind control. A pooled test can be carried by strong early
   days of a variant that is already fading (Linux trace: nw_renewal W3 led by 9pp and 5pp on D3-D4, then
   trailed by 3pp on D5-D6, and promoting it at D6 was graded harmful). Being an extra requirement, it can only
-  lower the false-winner rate.
+  lower the false-winner rate. It is not free: it also blocks a real winner that has one noisy day, and
+  `n_required` doesn't account for it. Monte Carlo at the MDE (true +5pp engagement on renewal, +4pp pickup on
+  KYC) puts power at about 0.77-0.78 instead of 0.80, so the power figures above are slightly optimistic. A
+  promotion is also revalidated at apply time, so one bad day in between can drop it.
 - **Inconclusive at the final look (pre-registered rule): change config only on evidence.** Inconclusive
-  means neither "proven better" nor "proven worse". We revert to control only if the challenger is
-  *significantly worse* on the primary or the guardrail (one-sided α=0.05). Otherwise the split stays exactly as
-  it is, with no change request, in its own state, `MONITORING_SPLIT` (never shown as a promotion), under the
-  daily decay monitor below. This rule went through two revisions, each driven by a traced harmful change:
-  "always revert" reverted a better challenger (−3.7% engagement in an independent reproduction); then "revert
-  if not ahead" reverted ks_cancel V3 on two Linux seeds where V3 and V1 sat within about 1pp of each other day
-  after day (graded −1.2% and −1.4%). Reverting a challenger indistinguishable from control is a coin flip that
-  costs a request; the monitor still rolls it back if evidence of harm appears.
+  means neither "proven better" nor "proven worse". Three cases: (a) *significantly worse* on the primary or the
+  guardrail (one-sided α=0.05): back to control. (b) Not significantly worse and **ahead or tied** on the
+  primary: the split stays exactly as it is, with no change request, in its own state, `MONITORING_SPLIT`
+  (never shown as a promotion), under the daily decay monitor below. (c) **Behind but not significantly**: the
+  challenger is stepped down to the 10% screening share (approval), then monitored. After a test powered for
+  the MDE, a challenger that is behind is unlikely to be better, so 50% of traffic on it carries risk with no
+  expected upside, and the decay monitor is too strict to move it quickly. A full revert of a non-significant
+  difference is a coin flip; the step-down bounds exposure at the limit we already accept for an untested
+  option. If the step-down is rejected, the 50/50 is kept and monitored (the client's call). History: "always
+  revert" reverted a better challenger (−3.7% engagement in an independent reproduction), which is why a
+  non-significant difference never triggers a full revert.
 - **Decay and rollback.** The winner goes to 90% with a 10% concurrent holdback. Every day at 13:00, a
   non-overlapping 24h window compares winner vs holdback on the primary and on the guardrail. The decay α is split
   across both checks and all remaining days: **α = 0.05 / (D_max × 2)** (D_max = days left; 30 in production),
   so the family-wise false-rollback rate is ≤ 5%. One window of a 10% holdback is only about 110 connected
   calls, so **one window never triggers a full revert**: a first signal only cuts exposure by one in-policy
   de-risk step where the policy allows it (otherwise it is recorded and watched), and the full revert is
-  requested only if the **next fresh window also fires**. A quiet window clears the suspicion; a de-risked
-  split is never stepped back up automatically. This replaced a single-window rule after an independent
+  requested only if the **next fresh window also fires**. A quiet window clears the suspicion. A de-risk step
+  that never confirms is not one-way: after 3 consecutive clean daily windows the pre-de-risk split is proposed
+  back once, through approval (never auto). This replaced a single-window rule after an independent
   reproduction traced two harmful full reverts to it on ks_cancel: W2 → W1 on a pickup p=0.0036 between welcome
   arms (welcome plays after pickup, so almost certainly noise), and V3 → V1 on an engagement p=0.0073 with a
   holdback of 110 calls. Under the split α the second no longer fires; under confirmation the first only
@@ -228,7 +235,9 @@ completed, so a restart within the same minute doesn't double-count detector win
   the non-inferiority bound, because with a 10% holdback the bound's width alone would trigger rollbacks on
   noise. Routing of a confirmed revert: auto-apply if within `max_shift` and the dimension is allowed,
   otherwise approval. An approved-but-unresolved revert stalls after 48h with a page and is never chained. Once
-  a client rejects a rollback, later rollbacks go to approval only, with no automatic step.
+  a client rejects a rollback, later rollbacks go to approval only, with no automatic step; asking again needs
+  a fresh two-window confirmation, and the client is re-asked at most once (so a decision already made doesn't
+  eat the tenant's daily request quota).
 - **Call time and caller ID.** History gives each number's own pickup by hour. A number is flagged only if it
   is worse than *its own* history at matched hours (z ≤ −3) **and** worse than its peers now (ratio ≤ 0.8),
   with ≥300 dials in a 3h window, on 2 consecutive hourly evaluations. The windows overlap by 2h, so this is a
@@ -527,9 +536,13 @@ refusals, 0 conflicts; ks_cancel peaked at 2 requests/24h. Flagged caller ID sha
 ## 13. Known weaknesses
 - **Experiments are slow by design.** One full cycle per workflow in an 8-10 day scenario. Effects under 5pp
   usually end inconclusive.
-- **An inconclusive challenger keeps its 50% split** (`MONITORING_SPLIT`). It is not proven better or worse.
-  The daily monitor rolls it back on two consecutive windows of evidence, but at α=0.05/(D_max×2) it only
-  catches a sizable harm, so a slightly worse challenger can sit at 50% until the end.
+- **An inconclusive challenger that is ahead or tied keeps its 50% split** (`MONITORING_SPLIT`); one that is
+  behind is stepped down to 10%. The daily monitor rolls either back on two consecutive windows of evidence,
+  but at α=0.05/(D_max×2) it only catches a sizable harm, so a challenger that is a little worse and happened
+  to be ahead at the final look can sit at 50% until the end.
+- **The inconclusive and decay rules changed after the final Linux runs** (step-down when behind, undoing an
+  unconfirmed de-risk, re-ask cap). They are covered by regression tests; the §11 results were measured before
+  this change.
 - **Decay detection is slower by design.** A full revert needs two consecutive daily windows, so a real decay is
   reverted about a day later than with a single-window rule (exposure is cut at the first signal where the
   policy allows a de-risk step). That trade was made deliberately: false full reverts are graded harmful.

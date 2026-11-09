@@ -154,13 +154,13 @@ def test_poisson_tiny_tails_keep_their_precision():
 
 
 def test_inconclusive_changes_config_only_on_evidence_of_harm():
-    """Pre-registered rule: at an inconclusive final look, revert only if the challenger is significantly worse.
-    The middle case is the Linux trace (ks_cancel V3 vs V1 within ~1pp, slightly behind): reverting it was graded
-    harmful twice, so a statistically indistinguishable challenger keeps its split under monitoring."""
+    """Pre-registered rule at an inconclusive final look: significantly worse -> back to control; ahead or tied ->
+    keep the split, monitored; behind but not significantly -> step down to the screening share (no coin-flip full
+    revert, and no 50% exposure on a challenger that is probably a little worse)."""
     from controller.metrics import Counts
     spec = {"workflow_id": "wf", "objective": {"primary": "engagement_rate",
                                                 "guardrail": {"pickup_rate_max_drop": 0.02}}}
-    for ch_rate, expect_keep in ((0.524, True), (0.493, True), (0.440, False)):
+    for ch_rate, expect in ((0.524, "keep"), (0.500, "keep"), (0.493, "stepdown"), (0.440, "revert")):
         conn, exps = _experiments_env()
         store.set_meta(conn, "end_minute", parse("D10 00:00"))
         sim_cfg = configs.current(conn, "wf")[1]
@@ -175,8 +175,11 @@ def test_inconclusive_changes_config_only_on_evidence_of_harm():
         verdict = exps.test_promotion(exp, spec, data)
         action = exps._end_inconclusive(exp, spec, data, verdict, {}, parse("D6 12:00"))
         state = conn.execute("SELECT state FROM experiments WHERE id=?", (eid,)).fetchone()[0]
-        if expect_keep:
+        if expect == "keep":
             assert action is None and state == "MONITORING_SPLIT"   # kept, monitored, never shown as a promotion
+        elif expect == "stepdown":
+            assert action.kind == "stepdown" and action.next_state == "MONITORING_SPLIT"
+            assert action.patch["allocations"]["default"]["voice"] == {"V1": 0.9, "V3": 0.1}
         else:
             assert action.kind == "conclude" and action.patch["allocations"]["default"]["voice"] == {"V1": 1.0}
 
@@ -263,3 +266,51 @@ def test_decay_case_a_first_signal_only_derisks_and_needs_a_second_window():
     _day(conn, "welcome_message", 11, "W2", (3600, 870, 430), "W1", (400, 122, 60))
     confirmed = _decay(conn, exps, spec, eid, 11)                        # second consecutive window
     assert confirmed.kind == "rollback" and confirmed.patch["allocations"]["default"]["welcome_message"] == {"W1": 1.0}
+
+
+def test_unconfirmed_derisk_is_offered_back_once_after_clean_windows():
+    """Review: one decay signal used to cut a proven winner's share for good. After DERISK_RESTORE_WINDOWS clean
+    daily windows the pre-de-risk split is proposed back (routine, approval), once."""
+    conn, exps, spec, eid = _decay_env({"W2": 0.9, "W1": 0.1}, "welcome_message")
+    _day(conn, "welcome_message", 8, "W2", (3600, 870, 430), "W1", (400, 122, 60))
+    assert _decay(conn, exps, spec, eid, 8).kind == "derisk"
+    conn.execute("UPDATE experiments SET state='DERISKED' WHERE id=?", (eid,))          # the auto step landed
+    for day in (9, 10):
+        _day(conn, "welcome_message", day, "W2", (3600, 990, 490), "W1", (400, 110, 54))
+        assert _decay(conn, exps, spec, eid, day) is None
+    _day(conn, "welcome_message", 11, "W2", (3600, 990, 490), "W1", (400, 110, 54))
+    restore = _decay(conn, exps, spec, eid, 11)
+    assert restore.kind == "restore" and restore.next_state == "PROMOTED"
+    assert restore.patch["allocations"]["default"]["welcome_message"] == {"W2": 0.9, "W1": 0.1}
+    _day(conn, "welcome_message", 12, "W2", (3600, 990, 490), "W1", (400, 110, 54))
+    assert _decay(conn, exps, spec, eid, 12) is None                                     # asked once only
+
+
+def test_rejected_rollback_needs_fresh_confirmation_and_is_reasked_at_most_once():
+    """Review: rejection cleared revert_requested but not the streak, so the next daily signal re-asked at once,
+    every day, spending the tenant's request quota arguing with the client's decision."""
+    conn, exps, spec, eid = _decay_env({"W2": 0.9, "W1": 0.1}, "welcome_message")
+    bad = ("W2", (3600, 870, 430), "W1", (400, 122, 60))
+    _day(conn, "welcome_message", 8, bad[0], bad[1], bad[2], bad[3])
+    _decay(conn, exps, spec, eid, 8)
+    _day(conn, "welcome_message", 9, *bad)
+    assert _decay(conn, exps, spec, eid, 9).kind == "rollback"
+    res = json.loads(conn.execute("SELECT result_json FROM experiments WHERE id=?", (eid,)).fetchone()[0])
+    res["pending"] = {"prev_state": "PROMOTED", "proposal_id": "wf:1:9"}
+    conn.execute("UPDATE experiments SET result_json=? WHERE id=?", (json.dumps(res), eid))
+    p = {"refs_json": json.dumps({"experiments": {str(eid): "ROLLED_BACK"}}), "kind": "rollback",
+         "proposal_id": "wf:1:9", "payload_json": json.dumps({"impact_score": 0.1})}
+    exps.on_terminal(conn, p, "REJECTED", parse("D9 15:00"))
+    _day(conn, "welcome_message", 10, *bad)
+    assert _decay(conn, exps, spec, eid, 10) is None             # streak restarted: one window is not confirmation
+    _day(conn, "welcome_message", 11, *bad)
+    assert _decay(conn, exps, spec, eid, 11).kind == "rollback"  # fresh confirmation: one re-ask
+    _day(conn, "welcome_message", 12, *bad)
+    assert _decay(conn, exps, spec, eid, 12) is None             # cap reached: the client's decision stands
+
+
+def test_cid_verdict_without_workflow_connections_does_not_crash():
+    from controller import detectors
+    from controller.metrics import Counts
+    out = detectors.cid_verdict(Counts(dials=400, connected=40), Counts(), None, Counts(dials=1000, connected=0))
+    assert out["eligible"] and not out["fire"]

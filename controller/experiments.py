@@ -6,8 +6,11 @@ One row per (workflow, dimension). Lifecycle (SUBMISSION §5):
      STAGE1 --best survivor >= control--> ADVANCING --apply--> STAGE2 (50/50, fresh data, looks at n/2 and n)
      STAGE1 --none qualifies--> PLANNED with the next untested options (if days remain) | CONCLUDING
      STAGE2 --primary passes at alpha* and guardrail non-inferior--> PROMOTING --apply--> PROMOTED (90/10)
-     STAGE2 --harm or inconclusive at last look--> CONCLUDING --apply--> KEPT_CONTROL
+     STAGE2 --harm, or inconclusive and significantly worse--> CONCLUDING --apply--> KEPT_CONTROL
+     STAGE2 --inconclusive, ahead or tied--> MONITORING_SPLIT (no change request)
+     STAGE2 --inconclusive, behind but not significantly--> STEPPING_DOWN --apply--> MONITORING_SPLIT (90/10)
      PROMOTED --daily decay check fires--> ROLLING_BACK [--auto de-risk step--> DERISKED] --apply--> ROLLED_BACK
+     DERISKED --3 clean daily windows--> RESTORING --apply--> PROMOTED | MONITORING_SPLIT (asked once)
      DERISKED --48h unresolved--> DERISKED_STALLED (terminal for automation; a human decides)
   Supervisor edit on the dimension (or cohorts) -> INVALIDATED. Rejected request -> REJECTED.
 
@@ -27,14 +30,15 @@ from .clock import MIN_PER_DAY, fmt, hour_of_day
 OWNER = "experiments"
 RUNNING = ("STAGE1", "STAGE2", "PROMOTED", "MONITORING_SPLIT", "DERISKED")
 MONITORED = ("PROMOTED", "MONITORING_SPLIT", "DERISKED")      # under the daily decay/harm check
-TRANSITIONAL = ("STARTING", "ADVANCING", "PROMOTING", "CONCLUDING", "ROLLING_BACK", "ABORTING")
+TRANSITIONAL = ("STARTING", "ADVANCING", "PROMOTING", "CONCLUDING", "ROLLING_BACK", "ABORTING", "STEPPING_DOWN",
+                "RESTORING")
 TERMINAL = ("KEPT_CONTROL", "ROLLED_BACK", "INVALIDATED", "REJECTED", "DERISKED_STALLED", "EXHAUSTED")
-ROUTINE_KINDS = ("explore", "advance", "promote", "conclude")
+ROUTINE_KINDS = ("explore", "advance", "promote", "conclude", "stepdown", "restore")
 
 
 @dataclass
 class Action:
-    kind: str                       # explore | advance | promote | conclude | abort | rollback
+    kind: str                       # explore | advance | promote | conclude | stepdown | restore | abort | rollback
     exp_id: int
     next_state: str
     patch: dict
@@ -227,24 +231,52 @@ class Experiments:
     def _end_inconclusive(self, exp, spec, data, verdict: dict, inputs: dict, minute: int) -> Action | None:
         """Pre-registered (SUBMISSION §5): inconclusive means "not proven better" AND "not proven worse".
 
-        Change config only on evidence. Revert to control only if the challenger is significantly worse than
-        control on the primary or the guardrail (one-sided alpha = HARM_ALPHA). Otherwise leave the split exactly
-        as it is, with no change request, under the daily decay monitor; that monitor needs two consecutive
-        windows before a full revert. Reverting a challenger that is statistically indistinguishable from control
-        is a coin flip that costs a request, and it was graded harmful in 2 of 3 Linux runs."""
+        Three cases, by the evidence at the final look:
+        - significantly worse on the primary or the guardrail (one-sided HARM_ALPHA): back to control;
+        - not significantly worse and ahead or tied on the primary: keep the split as it is, no request, under
+          the daily decay monitor. A full revert of an indistinguishable challenger is a coin flip;
+        - behind but not significantly: step the challenger down to the screening share (the exposure we already
+          accept for an untested option). After a test powered for MDE, a challenger that is behind is unlikely
+          to be better, so 50% of traffic on it carries risk with no expected upside; a step-down bounds that
+          without staking a full revert on a non-significant difference."""
         ch = verdict["challenger"]
         g_kpi, _ = _guardrail(spec)
         a, b = data.get(ch, metrics.Counts()), data.get(exp["control"], metrics.Counts())
         p_primary = stats.p_less(*a.num_den(exp["kpi"]), *b.num_den(exp["kpi"]))
         p_guard = stats.p_less(*a.num_den(g_kpi), *b.num_den(g_kpi))
-        inputs.update(p_primary_worse=_r(p_primary, 6), p_guardrail_worse=_r(p_guard, 6))
-        if p_primary >= settings.HARM_ALPHA and p_guard >= settings.HARM_ALPHA:
-            self._keep_split(exp, minute, inputs)
+        r1, r0 = a.rate(exp["kpi"]), b.rate(exp["kpi"])
+        behind = r1 is not None and r0 is not None and r1 < r0
+        inputs.update(p_primary_worse=_r(p_primary, 6), p_guardrail_worse=_r(p_guard, 6), challenger_behind=behind)
+        if p_primary < settings.HARM_ALPHA or p_guard < settings.HARM_ALPHA:
+            why = f"{exp['kpi']} significantly worse" if p_primary < settings.HARM_ALPHA \
+                else f"guardrail {g_kpi} significantly worse"
+            return self._conclude(exp, data, inputs, minute, reason=f"inconclusive at the final look and {why}: "
+                                                                     "back to control")
+        if not behind:
+            self._keep_split(exp, minute, inputs, "inconclusive, ahead or tied and not shown worse: keep the split, "
+                                                  "monitor daily")
             return None
-        why = f"{exp['kpi']} significantly worse" if p_primary < settings.HARM_ALPHA \
-            else f"guardrail {g_kpi} significantly worse"
-        return self._conclude(exp, data, inputs, minute, reason=f"inconclusive at the final look and {why}: "
-                                                                 "back to control")
+        res = json.loads(exp["result_json"])
+        if res.get("stepdown_asks", 0) >= settings.STEPDOWN_MAX_ASKS:
+            self._keep_split(exp, minute, {**inputs, "stepdown_asks": res["stepdown_asks"]},
+                             "inconclusive and behind, but the step-down request did not land "
+                             f"{settings.STEPDOWN_MAX_ASKS} times: keep the split, monitor daily")
+            return None
+        res["stepdown_asks"] = res.get("stepdown_asks", 0) + 1
+        self._save_result(exp, res)
+        share = settings.INCONCLUSIVE_BEHIND_SHARE
+        ctrl = exp["control"]
+        return Action("stepdown", exp["id"], "MONITORING_SPLIT",
+                      {"allocations": {"default": {exp["dim"]: {ctrl: 1 - share, ch: share}}}},
+                      f"Step {exp['dim']} {ch} down from {int(settings.STAGE2_SHARE * 100)}% to {int(share * 100)}% "
+                      f"(inconclusive and behind {ctrl})",
+                      f"Final look inconclusive: {exp['kpi']} {_pct(r1)} vs {_pct(r0)} (n={verdict['n']}), not "
+                      f"significantly worse (one-sided p={_r(p_primary, 4)}) but behind. A test powered for "
+                      f"{settings.STAGE2_MDE[exp['kpi']] * 100:.0f}pp makes a real gain unlikely, so half the traffic "
+                      f"is cut to the {int(share * 100)}% untested-option share instead of a full revert on a "
+                      f"non-significant difference. The daily decay monitor keeps watching.",
+                      impact.score_harm_avoided(max(0.0, (r0 or 0) - (r1 or 0)), settings.STAGE2_SHARE - share),
+                      inputs)
 
     def test_promotion(self, exp: sqlite3.Row, spec: dict, data: dict[str, metrics.Counts],
                        recent: dict[str, metrics.Counts] | None = None) -> dict:
@@ -335,9 +367,25 @@ class Experiments:
         fired = p_primary < alpha or p_guard < alpha
         streak = res.get("decay_streak", 0) + 1 if fired else 0
         res["decay_streak"] = streak
+        clean = 0 if fired else res.get("clean_windows", 0) + 1
+        res["clean_windows"] = clean
         self._save_result(exp, res)
-        inputs["consecutive_windows_fired"] = streak
+        inputs.update(consecutive_windows_fired=streak, consecutive_clean_windows=clean)
         if not fired:
+            restore = res.get("pre_derisk")
+            if exp["state"] == "DERISKED" and restore and not res.get("revert_requested") \
+                    and clean >= settings.DERISK_RESTORE_WINDOWS \
+                    and res.get("restore_asks", 0) < settings.RESTORE_MAX_ASKS:
+                res["restore_asks"] = res.get("restore_asks", 0) + 1
+                self._save_result(exp, res)
+                return Action("restore", exp["id"], restore["state"],
+                              {"allocations": {"default": {exp["dim"]: restore["alloc"]}}},
+                              f"Undo the {exp['dim']} de-risk step: {ch} back to its "
+                              f"{_pct(restore['alloc'].get(ch))} share",
+                              f"The de-risk step was taken on one decay signal that never confirmed: "
+                              f"{clean} consecutive clean daily windows since (one-sided alpha {alpha:.4f}). "
+                              f"Changing config only on evidence cuts both ways, so the cut is offered back once.",
+                              impact.score_exploration(restore["alloc"].get(ch, 0.0)), inputs)
             store.record_decision(self.conn, minute, exp["wf"], "experiment", "decay check: no decay", inputs,
                                   "keep the de-risked split" if exp["state"] == "DERISKED" else "keep",
                                   experiment_id=exp["id"])
@@ -354,6 +402,10 @@ class Experiments:
             # with a single in-policy step if the policy allows one, and let the next fresh window decide.
             if exp["state"] in ("PROMOTED", "MONITORING_SPLIT") and not res.get("client_kept") \
                     and self._derisk_possible(exp, spec):
+                _, cur = configs.current(self.conn, exp["wf"])
+                res["pre_derisk"] = {"state": exp["state"], "alloc": configs.dist(cur, "default", exp["dim"])}
+                res["restore_asks"] = 0
+                self._save_result(exp, res)
                 return Action("derisk", exp["id"], "DERISKED",
                               {"allocations": {"default": {exp["dim"]: {exp["control"]: 1.0}}}},
                               f"Cut {exp['dim']} {ch} exposure by one in-policy step (first decay signal)",
@@ -365,6 +417,19 @@ class Experiments:
                                   "first decay signal: waiting for the next window to confirm", inputs, "watch",
                                   experiment_id=exp["id"])
             return None
+        if res.get("client_kept"):
+            # The client already rejected a rollback. Their decision stands unless fresh evidence confirms again
+            # (the streak was reset on rejection), and even then they are asked at most CLIENT_KEPT_MAX_REASKS times.
+            asks = res.get("kept_reasks", 0)
+            inputs["reasks_after_client_kept"] = asks
+            if asks >= settings.CLIENT_KEPT_MAX_REASKS:
+                store.record_decision(self.conn, minute, exp["wf"], "experiment",
+                                      "decay confirmed again, but the client kept this variant and was already "
+                                      "re-asked: no further request", inputs, "keep (client decision)",
+                                      experiment_id=exp["id"])
+                return None
+            res["kept_reasks"] = asks + 1
+            self._save_result(exp, res)
         if exp["state"] == "DERISKED":
             self._draft_full_revert(exp, minute, impact_score, inputs)
             return None
@@ -406,15 +471,16 @@ class Experiments:
                       f"control.", impact.score_harm_avoided(harm, sum(1 for _ in arms) * settings.MAX_UNTESTED_PER_ARM),
                       inputs)
 
-    def _keep_split(self, exp, minute: int, inputs: dict) -> None:
+    def _d_max(self, minute: int) -> int:
+        return max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS
+
+    def _keep_split(self, exp, minute: int, inputs: dict, rule: str) -> None:
         """Inconclusive and not shown worse: no change request; the split stays under the daily monitor."""
         res = json.loads(exp["result_json"])
-        res.update(kept_split=True, promoted_minute=minute,
-                   d_max=max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS)
+        res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(minute))
         self._save_result(exp, res)
-        store.record_decision(self.conn, minute, exp["wf"], "experiment",
-                              "inconclusive; neither proven better nor shown worse: keep the split, monitor daily",
-                              inputs, "keep split", experiment_id=exp["id"])
+        store.record_decision(self.conn, minute, exp["wf"], "experiment", rule, inputs, "keep split",
+                              experiment_id=exp["id"])
         self._set(exp, minute, "MONITORING_SPLIT", "split kept under monitoring (not a promotion)",
                   {"start_minute": minute, "stage": 3})
 
@@ -515,10 +581,13 @@ class Experiments:
                 if next_state == "STAGE2":
                     cols["n_required"] = self._n_required(exp)
                 cols["arms_json"] = json.dumps(arms)
-            elif next_state == "PROMOTED":
+            elif next_state in ("PROMOTED", "MONITORING_SPLIT"):   # promote, step-down, or a de-risk undone
                 cols.update(start_version=version, start_minute=minute, stage=3)
-                res["d_max"] = max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS
-                res["promoted_minute"] = minute
+                res.update(d_max=self._d_max(minute), promoted_minute=minute, decay_streak=0, clean_windows=0)
+                if next_state == "MONITORING_SPLIT":
+                    res["kept_split"] = True
+                for k in ("pre_derisk", "derisk_version"):
+                    res.pop(k, None)
             elif next_state == "DERISKED":
                 res["derisk_version"] = version     # the full revert waits for a confirming window
             elif next_state == "PLANNED_NEXT":
@@ -538,8 +607,23 @@ class Experiments:
             if p["kind"] == "rollback":
                 res["revert_requested"] = False                  # a later confirmed signal may ask again
             if state == "REJECTED":
+                if p["kind"] == "stepdown":                      # client wants the 50/50 kept: keep it, monitored
+                    res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(minute))
+                    self._save_result(exp, res)
+                    self._set(exp, minute, "MONITORING_SPLIT",
+                              "step-down rejected: client kept the 50/50 split; monitored daily", {"stage": 3,
+                                                                                                  "start_minute": minute},
+                              proposal_id=p["proposal_id"])
+                    continue
+                if p["kind"] == "restore":                       # client prefers the reduced share: it stays
+                    res["restore_asks"] = settings.RESTORE_MAX_ASKS
+                    self._save_result(exp, res)
+                    self._set(exp, minute, prev, "undoing the de-risk step was rejected: reduced share kept", {},
+                              proposal_id=p["proposal_id"])
+                    continue
                 if p["kind"] in ("rollback", "derisk"):
                     res["client_kept"] = True                    # client decided: no further auto steps
+                    res["decay_streak"] = 0                      # asking again needs fresh confirmation
                     self._save_result(exp, res)
                     self._set(exp, minute, prev,
                               "rollback rejected: client kept the promoted variant despite decay evidence",
@@ -699,7 +783,8 @@ def _transitional(action_kind: str, draft_kind: str) -> str:
     if draft_kind == "derisk":
         return "ROLLING_BACK"
     return {"explore": "STARTING", "advance": "ADVANCING", "promote": "PROMOTING", "conclude": "CONCLUDING",
-            "abort": "ABORTING", "rollback": "ROLLING_BACK", "derisk": "ROLLING_BACK"}[action_kind]
+            "abort": "ABORTING", "rollback": "ROLLING_BACK", "derisk": "ROLLING_BACK",
+            "stepdown": "STEPPING_DOWN", "restore": "RESTORING"}[action_kind]
 
 
 def _arms_after(a: Action, exp: sqlite3.Row) -> list[str]:
