@@ -356,6 +356,8 @@ class Experiments:
 
     def _eval_decay(self, exp: sqlite3.Row, spec: dict, minute: int) -> Action | None:
         res = json.loads(exp["result_json"])
+        if not json.loads(exp["arms_json"]):
+            return None                         # nothing live to compare (no path gets here today; cheap guard)
         last = res.get("last_decay_check", exp["start_minute"])
         if hour_of_day(minute) != settings.DECAY_CHECK_HOUR or minute - last < MIN_PER_DAY:
             return None
@@ -418,7 +420,7 @@ class Experiments:
         if streak < settings.DECAY_CONFIRM_WINDOWS:
             # One window of a 10% holdback is ~100 calls: never enough on its own for a full revert. Cut exposure
             # with a single in-policy step if the policy allows one, and let the next fresh window decide.
-            if exp["state"] in ("PROMOTED", "MONITORING_SPLIT") and not res.get("client_kept") \
+            if exp["state"] in ("PROMOTED", "MONITORING_SPLIT") and not _client_said_no(res) \
                     and self._derisk_possible(exp, spec):
                 _, cur = configs.current(self.conn, exp["wf"])
                 res["pre_derisk"] = {"state": exp["state"], "alloc": configs.dist(cur, "default", exp["dim"])}
@@ -435,7 +437,7 @@ class Experiments:
                                   "first decay signal: waiting for the next window to confirm", inputs, "watch",
                                   experiment_id=exp["id"])
             return None
-        if res.get("client_kept"):
+        if _client_said_no(res):
             # The client already rejected a rollback. Their decision stands unless fresh evidence confirms again
             # (the streak was reset on rejection), and even then they are asked at most CLIENT_KEPT_MAX_REASKS times.
             asks = res.get("kept_reasks", 0)
@@ -524,7 +526,7 @@ class Experiments:
         if routine:
             self._make_draft(wf, routine, "approval", False, minute)
         for a in urgent:                        # harm-reduction: auto where the policy allows, else approval
-            if a.kind == "rollback" and json.loads(self._row(a.exp_id)["result_json"]).get("client_kept"):
+            if a.kind == "rollback" and _client_said_no(json.loads(self._row(a.exp_id)["result_json"])):
                 self._make_draft(wf, [a], "approval", True, minute)     # the client said no once: ask, never step
                 continue
             target = configs.apply_patch(cur, a.patch)
@@ -846,6 +848,14 @@ class Experiments:
 def _guardrail(spec: dict) -> tuple[str, float]:
     (key, drop), = spec["objective"]["guardrail"].items()
     return key.removesuffix("_max_drop"), float(drop)
+
+
+def _client_said_no(res: dict) -> bool:
+    """The client has declined moving this dimension back toward control: they rejected a rollback, or declined a
+    conclude ("don't go back to control"). Then there is no automatic step toward control; a full revert goes to
+    approval and is re-asked at most CLIENT_KEPT_MAX_REASKS times. A declined advance or promote doesn't count:
+    moving toward control isn't what was declined there."""
+    return bool(res.get("client_kept")) or res.get("client_declined") == "conclude"
 
 
 def _transitional(action_kind: str, draft_kind: str) -> str:

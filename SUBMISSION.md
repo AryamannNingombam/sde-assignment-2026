@@ -39,8 +39,8 @@ Runbook for on-call: README §11.
 7. A rejection with a specific reason, a second rejection, or a rejected rollback is the client's decision. A
    routine request rejected with no specific reason ("judgement call") is re-derived from fresh data and asked
    once more, no earlier than the next approver day (§6). An unexplained rejection is detected by the
-   approver's reason text (`settings.REQUEUE_REASON_MARKERS`, pinned by a test against the simulator's
-   wording); if that wording changed, the rejection would simply count as final. An incident fix is re-asked
+   approver's reason text as returned by GET /approvals (`settings.REQUEUE_REASON_MARKERS`, pinned by a test
+   against an observed reason); if that wording changed, the rejection would simply count as final. An incident fix is re-asked
    once only for an open safety incident, after every other candidate has been tried.
 8. A supervisor edit always stands. We never revert one except through an approval request that names it.
 9. Simulated time is the only clock for logic. Wall time is used only for load metrics.
@@ -241,7 +241,8 @@ divided by the number of live challengers when more than one is monitored),
   the non-inferiority bound, because with a 10% holdback the bound's width alone would trigger rollbacks on
   noise. Routing of a confirmed revert: auto-apply if within `max_shift` and the dimension is allowed,
   otherwise approval. An approved-but-unresolved revert stalls after 48h with a page and is never chained. Once
-  a client rejects a rollback, later rollbacks go to approval only, with no automatic step; asking again needs
+  a client rejects a rollback, or declines a conclude (both mean "don't go back to control"), later rollbacks
+  go to approval only, with no automatic step; asking again needs
   a fresh two-window confirmation, and the client is re-asked at most once (so a decision already made doesn't
   eat the tenant's daily request quota).
 - **Call time and caller ID.** History gives each number's own pickup by hour. A number is flagged only if it

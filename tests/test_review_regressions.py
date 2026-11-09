@@ -440,10 +440,36 @@ def test_final_rejection_with_a_live_challenger_stays_monitored():
     assert res["client_declined"] == "promote" and res["kept_split"] and res["d_max"] == 4
 
 
-def test_requeue_marker_matches_the_simulators_actual_reason_text():
+# Rejection reasons as the controller received them from GET /approvals (stored in proposals.reasons).
+OBSERVED_UNEXPLAINED = "approver declined (judgement call)"     # public_02, nw_renewal:3:1, explore, D0 10:45
+OBSERVED_SPECIFIC = "approver fatigue: more than 4 requests in 24h for this workflow — batch your changes"
+
+
+def test_requeue_marker_matches_reason_text_observed_over_the_api():
     """REQUEUE_REASON_MARKERS depends on the approver's wording; if it drifts, re-queueing silently stops."""
-    from pathlib import Path
     from controller import settings
-    source = (Path(__file__).resolve().parents[1] / "sim" / "world.py").read_text(encoding="utf-8")
-    assert all(m in source for m in settings.REQUEUE_REASON_MARKERS)
-    assert "approver declined (judgement call)" in source
+    assert any(m in OBSERVED_UNEXPLAINED for m in settings.REQUEUE_REASON_MARKERS)
+    assert not any(m in OBSERVED_SPECIFIC for m in settings.REQUEUE_REASON_MARKERS)
+
+
+def test_declined_conclude_is_never_overridden_by_an_automatic_derisk_step():
+    """Review: a client who declined a conclude said "don't go back to control". A first decay signal must not
+    auto-apply a step toward control; the confirmed revert goes to approval, re-asked at most once."""
+    conn, exps, spec, eid = _decay_env({"W2": 0.9, "W1": 0.1}, "welcome_message")
+    conn.execute("UPDATE experiments SET state='MONITORING_SPLIT', result_json=? WHERE id=?",
+                 (json.dumps({"d_max": 4, "client_declined": "conclude"}), eid))
+    bad = ("W2", (3600, 870, 430), "W1", (400, 122, 60))
+    _day(conn, "welcome_message", 8, *bad)
+    assert _decay(conn, exps, spec, eid, 8) is None                  # first signal: watch only, no auto step
+    _day(conn, "welcome_message", 9, *bad)
+    assert _decay(conn, exps, spec, eid, 9).kind == "rollback"       # confirmed: one ask, through approval
+    _day(conn, "welcome_message", 10, *bad)
+    _day(conn, "welcome_message", 11, *bad)
+    _decay(conn, exps, spec, eid, 10)
+    assert _decay(conn, exps, spec, eid, 11) is None                 # re-ask cap reached
+
+
+def test_decay_check_with_no_live_arm_is_a_no_op():
+    conn, exps, spec, eid = _decay_env({"W2": 0.9, "W1": 0.1}, "welcome_message")
+    conn.execute("UPDATE experiments SET arms_json='[]' WHERE id=?", (eid,))
+    assert _decay(conn, exps, spec, eid, 8) is None
