@@ -314,3 +314,98 @@ def test_cid_verdict_without_workflow_connections_does_not_crash():
     from controller.metrics import Counts
     out = detectors.cid_verdict(Counts(dials=400, connected=40), Counts(), None, Counts(dials=1000, connected=0))
     assert out["eligible"] and not out["fire"]
+
+
+def test_batched_proposal_callbacks_use_each_experiments_own_action():
+    """Review: routine actions of one workflow share a proposal whose kind is e.g. "promote+restore+stepdown".
+    revalidate/on_terminal compared that joined kind with a single kind, so a batched promotion was never
+    re-checked and a rejected batched step-down/restore fell into the generic branch (terminal REJECTED,
+    leaving a split with no monitoring)."""
+    from controller.experiments import Action
+    spec = {"workflow_id": "wf", "objective": {"primary": "engagement_rate",
+                                                "guardrail": {"pickup_rate_max_drop": 0.02}}}
+    conn, _ = _experiments_env()
+    store.set_meta(conn, "end_minute", parse("D10 00:00"))
+    exps = Experiments(conn, {"wf": spec})
+
+    def exp(dim, state, control, arm, res):
+        return conn.execute("INSERT INTO experiments(wf, dim, kpi, stage, state, control, arms_json, screened_json,"
+                            " result_json, start_version) VALUES('wf',?,'engagement_rate',2,?,?,?,'[]',?,1)",
+                            (dim, state, control, json.dumps([arm]), json.dumps(res))).lastrowid
+    promote = exp("welcome_message", "STAGE2", "W1", "W2", {})
+    stepdown = exp("voice", "STAGE2", "V1", "V3", {})
+    restore = exp("caller_id", "DERISKED", "C1", "C2", {"d_max": 4})
+    acts = [Action("promote", promote, "PROMOTED", {"allocations": {"default": {"welcome_message": {"W2": 0.9,
+                                                                                                    "W1": 0.1}}}},
+                   "s", "r", 0.1),
+            Action("stepdown", stepdown, "MONITORING_SPLIT", {"allocations": {"default": {"voice": {"V1": 0.9,
+                                                                                                  "V3": 0.1}}}},
+                   "s", "r", 0.1),
+            Action("restore", restore, "PROMOTED", {"allocations": {"default": {"caller_id": {"C2": 0.9,
+                                                                                            "C1": 0.1}}}},
+                   "s", "r", 0.1)]
+    exps._make_draft("wf", acts, "approval", False, parse("D6 12:00"))
+    p = conn.execute("SELECT * FROM proposals").fetchone()
+    assert p["kind"] == "promote+restore+stepdown"
+    ok, why = exps.revalidate(conn, p, parse("D6 13:00"))         # no data: the batched promotion must not pass
+    assert not ok and "promotion no longer passes" in why
+    exps.on_terminal(conn, p, "REJECTED", parse("D6 14:00"))
+    state = {r["id"]: r["state"] for r in conn.execute("SELECT id, state FROM experiments")}
+    assert state[promote] == "REJECTED"
+    assert state[stepdown] == "MONITORING_SPLIT"                  # 50/50 kept, still monitored
+    assert state[restore] == "DERISKED"                           # reduced share kept, still monitored
+
+
+def test_decay_budget_is_fixed_at_first_entry_into_monitoring():
+    """Review: re-entering monitoring recomputed D_max from the days left, dropping spent checks from the split."""
+    conn, exps, spec, eid = _decay_env({"W2": 0.9, "W1": 0.1}, "welcome_message")    # d_max 4 at promotion
+    exp = conn.execute("SELECT * FROM experiments WHERE id=?", (eid,)).fetchone()
+    assert exps._d_max(json.loads(exp["result_json"]), parse("D10 13:00")) == 4      # 2 days left, budget stays 4
+    assert exps._d_max({}, parse("D10 13:00")) == 2                                   # first entry: days left
+
+
+def test_unexplained_rejection_is_requeued_once_from_fresh_data_on_the_next_approver_day():
+    """Review: one random "approver declined (judgement call)" ended nw_renewal's whole experiment programme.
+    Memo 05 treats an expiry as a rejection to re-queue with fresh data; an unexplained rejection gets the same,
+    once. A second one, or a rejection with a specific reason, is final."""
+    spec = {"workflow_id": "wf", "tenant_id": "t", "objective": {"primary": "engagement_rate",
+                                                                 "guardrail": {"pickup_rate_max_drop": 0.02}},
+            "options": {"voice": ["V1", "V2", "V3"]}, "governance": {"approver_hours": [10, 19]}}
+
+    def rejected_explore(reason):
+        conn, _ = _experiments_env()
+        store.set_meta(conn, "end_minute", parse("D10 00:00"))
+        exps = Experiments(conn, {"wf": spec})
+        exps._stage1_mde = lambda exp, spec: {}                   # no call history in this fixture
+        eid = conn.execute("INSERT INTO experiments(wf, dim, kpi, stage, state, control, arms_json, screened_json,"
+                           " result_json) VALUES('wf','voice','engagement_rate',1,'PLANNED','V1','[]','[]','{}')"
+                           ).lastrowid
+
+        def cycle(minute):
+            exp = conn.execute("SELECT * FROM experiments WHERE id=?", (eid,)).fetchone()
+            act = exps._plan_stage1(exp, spec, parse(minute))
+            if act is None:
+                return None
+            exps._make_draft("wf", [act], "approval", False, parse(minute))
+            p = conn.execute("SELECT * FROM proposals ORDER BY rowid DESC LIMIT 1").fetchone()
+            conn.execute("UPDATE proposals SET reasons=? WHERE proposal_id=?", (json.dumps([reason]),
+                                                                              p["proposal_id"]))
+            exps.on_terminal(conn, conn.execute("SELECT * FROM proposals WHERE proposal_id=?",
+                                                (p["proposal_id"],)).fetchone(), "REJECTED", parse(minute))
+            return p["proposal_id"]
+
+        def state():
+            return conn.execute("SELECT state FROM experiments WHERE id=?", (eid,)).fetchone()[0]
+        return cycle, state
+
+    cycle, state = rejected_explore("approver declined (judgement call)")
+    first = cycle("D0 14:00")
+    assert state() == "PLANNED"                                   # re-queued, not ended
+    assert cycle("D0 18:00") is None and cycle("D1 09:59") is None  # not before the next approver day
+    second = cycle("D1 10:00")
+    assert second and second != first                             # re-derived: a new proposal, not a resubmit
+    assert state() == "REJECTED"                                  # second rejection is final
+
+    cycle, state = rejected_explore("approver fatigue: more than 4 requests in 24h for this workflow")
+    cycle("D0 14:00")
+    assert state() == "REJECTED"                                  # a specific reason is never re-queued

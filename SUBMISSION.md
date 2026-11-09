@@ -36,7 +36,9 @@ Runbook for on-call: README §11.
    are "unknown". No effect is predicted for them, only an exposure bound.
 6. A memo's stated preference that is stricter than policy is honoured as policy: Kestrel's "after 11:00" and
    "two requests a day" (`settings.TENANT_*`).
-7. An approver's judgement-call rejection is the client's decision. Content is re-asked once only for an open
+7. A rejection with a specific reason, a second rejection, or a rejected rollback is the client's decision. A
+   routine request rejected with no specific reason ("judgement call") is re-derived from fresh data and asked
+   once more, no earlier than the next approver day (§6). An incident fix is re-asked once only for an open
    safety incident, after every other candidate has been tried.
 8. A supervisor edit always stands. We never revert one except through an approval request that names it.
 9. Simulated time is the only clock for logic. Wall time is used only for load metrics.
@@ -220,7 +222,8 @@ completed, so a restart within the same minute doesn't double-count detector win
   non-significant difference never triggers a full revert.
 - **Decay and rollback.** The winner goes to 90% with a 10% concurrent holdback. Every day at 13:00, a
   non-overlapping 24h window compares winner vs holdback on the primary and on the guardrail. The decay α is split
-  across both checks and all remaining days: **α = 0.05 / (D_max × 2)** (D_max = days left; 30 in production),
+  across both checks and all remaining days: **α = 0.05 / (D_max × 2)** (D_max = days left when the experiment
+first enters monitoring, never recomputed on a step-down or an undone de-risk; 30 in production),
   so the family-wise false-rollback rate is ≤ 5%. One window of a 10% holdback is only about 110 connected
   calls, so **one window never triggers a full revert**: a first signal only cuts exposure by one in-policy
   de-risk step where the policy allows it (otherwise it is recorded and watched), and the full revert is
@@ -265,6 +268,13 @@ completed, so a restart within the same minute doesn't double-count detector win
   classified by the actor of the intervening versions. If a supervisor touched our dimension, their change
   stands and nothing is re-proposed. If it was our own change, the same patch is rebased automatically.
   Proposals are stored as **patches**, so a rebase is mechanical.
+- **Unexplained rejections are re-queued once.** Product's memo says "an expired proposal is a rejection.
+  Re-queue it with fresh data. Don't resubmit the stale one." We apply the same handling to a routine request
+  (explore, advance, promote, conclude) rejected with no specific reason: the experiment returns to the state
+  it decided from and re-derives the request from data up to then, under a new proposal_id, no earlier than
+  the next approver day. That is once per experiment. A second rejection, or any specific reason (policy,
+  fatigue, validation), ends it as `REJECTED`. This extends the memo: it names expiry, not rejection. Without
+  it, a single random decline ended nw_renewal's whole welcome/voice programme for 10 days on public_02.
 - **Batching and timing.** One routine request in flight per workflow, batching every dimension that changes
   together. Submission happens only in approver hours (Kestrel ≥ 11:00), and only when the p75 latency plus one
   tick fits before hours end. Routine requests expire at the end of that approver day, so stale evidence isn't
@@ -519,7 +529,8 @@ refusals, 0 conflicts; ks_cancel peaked at 2 requests/24h. Flagged caller ID sha
   rebased and resubmitted; (7) a supervisor edit stored by a restart's sync never being acted on.
   **0 harmful changes across all 6 final Linux runs.**
 - **What we'd change.** Renewal gains little: one cycle per workflow is the ceiling in about 8 days, and judgement
-  call rejections (5-10%) end a workflow's exploration. In production I'd re-offer once after a week.
+  call rejections (5-10%) used to end a workflow's exploration. They are now re-queued once from fresh data
+  (§6); in production I'd also re-offer a finally rejected test after a week.
 
 ## 12. Trade-offs & rejected alternatives
 | Option | Why considered | Why rejected / what instead |
@@ -541,8 +552,8 @@ refusals, 0 conflicts; ks_cancel peaked at 2 requests/24h. Flagged caller ID sha
   but at α=0.05/(D_max×2) it only catches a sizable harm, so a challenger that is a little worse and happened
   to be ahead at the final look can sit at 50% until the end.
 - **The inconclusive and decay rules changed after the final Linux runs** (step-down when behind, undoing an
-  unconfirmed de-risk, re-ask cap). They are covered by regression tests; the §11 results were measured before
-  this change.
+  unconfirmed de-risk, re-ask cap), and so did rejection handling (one re-queue of an unexplained rejection).
+  They are covered by regression tests; the §11 results were measured before these changes.
 - **Decay detection is slower by design.** A full revert needs two consecutive daily windows, so a real decay is
   reverted about a day later than with a single-window rule (exposure is cut at the first signal where the
   policy allows a de-risk step). That trade was made deliberately: false full reverts are graded harmful.

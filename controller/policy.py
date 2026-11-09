@@ -39,6 +39,11 @@ def next_working(spec: dict, minute: int) -> int:
     return minute
 
 
+def next_approver_day(spec: dict, minute: int) -> int:
+    """Start of the tenant's approver window on the next calendar day (a re-queue never goes out the same day)."""
+    return (minute // MIN_PER_DAY + 1) * MIN_PER_DAY + window(spec)[0]
+
+
 def can_submit_now(spec: dict, minute: int, urgent: bool) -> tuple[bool, str]:
     """Routine changes must be decided and applied the same approver day; urgent ones only before expiry."""
     lo, hi = window(spec)

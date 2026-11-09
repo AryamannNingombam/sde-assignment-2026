@@ -12,6 +12,9 @@ One row per (workflow, dimension). Lifecycle (SUBMISSION §5):
      PROMOTED --daily decay check fires--> ROLLING_BACK [--auto de-risk step--> DERISKED] --apply--> ROLLED_BACK
      DERISKED --3 clean daily windows--> RESTORING --apply--> PROMOTED | MONITORING_SPLIT (asked once)
      DERISKED --48h unresolved--> DERISKED_STALLED (terminal for automation; a human decides)
+  Routine request rejected with no specific reason (judgement call) -> back to the state it was decided from,
+  re-derived from fresh data on the next approver day, once. A second such rejection, or a specific reason ->
+  REJECTED.
   Supervisor edit on the dimension (or cohorts) -> INVALIDATED. Rejected request -> REJECTED.
 
 Data for a test is always filtered by config_version >= the stage's start version, so stages never share data
@@ -104,6 +107,8 @@ class Experiments:
         return None
 
     def _plan_stage1(self, exp: sqlite3.Row, spec: dict, minute: int) -> Action | None:
+        if self._requeue_wait(exp, minute):
+            return None
         arms = self._next_challengers(spec, exp)
         days_left = self._days_left(minute)
         if not arms:
@@ -138,6 +143,8 @@ class Experiments:
         look = exp["looks_done"] + 1
         if minute < start + look * MIN_PER_DAY:
             return None
+        if look >= settings.STAGE1_DAYS and self._requeue_wait(exp, minute):
+            return None                         # the end-of-screen decision waits; nothing is consumed
         arms = json.loads(exp["arms_json"])
         data = self._arm_counts(exp, exp["start_version"])
         ctrl = data.get(exp["control"], metrics.Counts())
@@ -199,6 +206,8 @@ class Experiments:
                                   inputs, "continue", experiment_id=exp["id"])
         n_req = exp["n_required"]
         if exp["looks_done"] >= settings.STAGE2_LOOKS:
+            if self._requeue_wait(exp, minute):
+                return None                     # after the daily harm look above, which never waits
             # Every pre-declared look is spent; we are back here because a promotion request didn't land. No new
             # test: re-propose only if a look already passed AND the result still holds now. Requiring both can only
             # lower the false-winner rate, so the family-wise alpha stays <= ALPHA.
@@ -471,13 +480,19 @@ class Experiments:
                       f"control.", impact.score_harm_avoided(harm, sum(1 for _ in arms) * settings.MAX_UNTESTED_PER_ARM),
                       inputs)
 
-    def _d_max(self, minute: int) -> int:
+    def _d_max(self, res: dict, minute: int) -> int:
+        """Decay-check budget, fixed the FIRST time the experiment enters monitoring. Re-entering (step-down, a
+        de-risk undone) must not recompute it from the days left: checks already spent would drop out of the
+        Bonferroni split and the per-check alpha would quietly drift above ALPHA / (D_max * 2). Every later check
+        happens within the original horizon, so the cumulative `decay_checks` never exceeds this budget."""
+        if "d_max" in res:
+            return res["d_max"]
         return max(1, math.ceil(self._days_left(minute))) if self._end() else settings.PRODUCTION_DECAY_DAYS
 
     def _keep_split(self, exp, minute: int, inputs: dict, rule: str) -> None:
         """Inconclusive and not shown worse: no change request; the split stays under the daily monitor."""
         res = json.loads(exp["result_json"])
-        res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(minute))
+        res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(res, minute))
         self._save_result(exp, res)
         store.record_decision(self.conn, minute, exp["wf"], "experiment", rule, inputs, "keep split",
                               experiment_id=exp["id"])
@@ -535,7 +550,9 @@ class Experiments:
         for a in acts:
             exp = self._row(a.exp_id)
             res = json.loads(exp["result_json"])
-            res["pending"] = {"kind": kind, "prev_state": exp["state"], "proposal_id": pid,
+            # `action` is THIS experiment's own action: a batched proposal's kind is e.g. "promote+stepdown",
+            # so callbacks must branch on `action`, never on the proposal kind.
+            res["pending"] = {"kind": kind, "action": a.kind, "prev_state": exp["state"], "proposal_id": pid,
                               "arms_after": _arms_after(a, exp), "analysis": a.analysis}
             self._save_result(exp, res)
             self.conn.execute("UPDATE experiments SET state=?, updated_minute=? WHERE id=?",
@@ -550,7 +567,7 @@ class Experiments:
             pending = json.loads(exp["result_json"]).get("pending") or {}
             if pending.get("proposal_id") != p["proposal_id"] and pending.get("proposal_id") != p["parent_proposal_id"]:
                 return False, f"experiment {eid} is no longer waiting for this change ({exp['state']})"
-            if p["kind"] == "promote":
+            if pending.get("action", p["kind"]) == "promote":
                 data = self._arm_counts(exp, exp["start_version"])
                 verdict = self.test_promotion(exp, self.specs[exp["wf"]], data, self._recent(exp, minute))
                 if not verdict["promote"]:
@@ -583,7 +600,7 @@ class Experiments:
                 cols["arms_json"] = json.dumps(arms)
             elif next_state in ("PROMOTED", "MONITORING_SPLIT"):   # promote, step-down, or a de-risk undone
                 cols.update(start_version=version, start_minute=minute, stage=3)
-                res.update(d_max=self._d_max(minute), promoted_minute=minute, decay_streak=0, clean_windows=0)
+                res.update(d_max=self._d_max(res, minute), promoted_minute=minute, decay_streak=0, clean_windows=0)
                 if next_state == "MONITORING_SPLIT":
                     res["kept_split"] = True
                 for k in ("pre_derisk", "derisk_version"):
@@ -602,26 +619,27 @@ class Experiments:
             res = json.loads(exp["result_json"])
             pending = res.pop("pending", {}) or {}
             prev = pending.get("prev_state", "STAGE1")
+            action = pending.get("action", p["kind"])            # this experiment's part of a batched proposal
             if exp["state"] in TERMINAL:
                 continue
-            if p["kind"] == "rollback":
+            if action == "rollback":
                 res["revert_requested"] = False                  # a later confirmed signal may ask again
             if state == "REJECTED":
-                if p["kind"] == "stepdown":                      # client wants the 50/50 kept: keep it, monitored
-                    res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(minute))
+                if action == "stepdown":                         # client wants the 50/50 kept: keep it, monitored
+                    res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(res, minute))
                     self._save_result(exp, res)
                     self._set(exp, minute, "MONITORING_SPLIT",
                               "step-down rejected: client kept the 50/50 split; monitored daily", {"stage": 3,
                                                                                                   "start_minute": minute},
                               proposal_id=p["proposal_id"])
                     continue
-                if p["kind"] == "restore":                       # client prefers the reduced share: it stays
+                if action == "restore":                          # client prefers the reduced share: it stays
                     res["restore_asks"] = settings.RESTORE_MAX_ASKS
                     self._save_result(exp, res)
                     self._set(exp, minute, prev, "undoing the de-risk step was rejected: reduced share kept", {},
                               proposal_id=p["proposal_id"])
                     continue
-                if p["kind"] in ("rollback", "derisk"):
+                if action in ("rollback", "derisk"):
                     res["client_kept"] = True                    # client decided: no further auto steps
                     res["decay_streak"] = 0                      # asking again needs fresh confirmation
                     self._save_result(exp, res)
@@ -630,20 +648,43 @@ class Experiments:
                               {"derisk_expires": None}, proposal_id=p["proposal_id"])
                     store.raise_alert(conn, minute, "summary", exp["wf"],
                                       f"client kept {exp['dim']} promotion despite decay evidence (exp {exp['id']})")
+                elif self._requeue(exp, res, p, prev, action, minute):
+                    pass
                 else:
                     self._save_result(exp, res)
-                    self._set(exp, minute, "REJECTED", f"{p['kind']} rejected by approver; current split kept", {},
+                    self._set(exp, minute, "REJECTED", f"{action} rejected by approver; current split kept", {},
                               proposal_id=p["proposal_id"])
                 continue
-            if p["kind"] == "rollback" and state in ("EXPIRED", "LAPSED"):
+            if action == "rollback" and state in ("EXPIRED", "LAPSED"):
                 res["revert_redrafts"] = res.get("revert_redrafts", 0) + 1
             self._save_result(exp, res)                          # expired/lapsed/dropped/stale: decide again
-            self._set(exp, minute, prev, f"{p['kind']} {state.lower()}: re-decide from fresh data", {},
+            self._set(exp, minute, prev, f"{action} {state.lower()}: re-decide from fresh data", {},
                       proposal_id=p["proposal_id"])
             if prev == "DERISKED" and res.get("revert_redrafts", 0) <= 1 and state in ("EXPIRED", "LAPSED"):
                 payload = json.loads(p["payload_json"])
                 self._draft_full_revert(self._row(exp["id"]), minute, payload["impact_score"],
                                         {"redraft_of": p["proposal_id"]})
+
+    def _requeue(self, exp, res: dict, p, prev: str, action: str, minute: int) -> bool:
+        """A routine request rejected with no specific reason is re-queued once, like an expiry (memo 05: an
+        expired proposal is a rejection; re-queue it with fresh data, never the stale one). The experiment goes
+        back to the state it decided from, so the request is re-derived from data up to then, under a new
+        proposal_id, and not before the next approver day. A second rejection, or any specific reason, is final."""
+        reasons = json.loads(p["reasons"] or "[]")
+        unexplained = bool(reasons) and all(any(m in r for m in settings.REQUEUE_REASON_MARKERS) for r in reasons)
+        if action not in ROUTINE_KINDS or not unexplained or res.get("requeues", 0) >= settings.REQUEUE_MAX:
+            return False
+        after = policy.next_approver_day(self.specs[exp["wf"]], minute)
+        res.update(requeues=res.get("requeues", 0) + 1, requeue_after=after)
+        self._save_result(exp, res)
+        self._set(exp, minute, prev, f"{action} rejected without a specific reason ({'; '.join(reasons)}): "
+                                     f"re-decide from fresh data and re-ask once, not before {fmt(after)}", {},
+                  proposal_id=p["proposal_id"])
+        return True
+
+    def _requeue_wait(self, exp, minute: int) -> bool:
+        after = json.loads(exp["result_json"]).get("requeue_after")
+        return after is not None and minute < after
 
     # ================================================================== supervisor edits
     def on_supervisor_edit(self, wf: str, dims: list[str], version: int, minute: int) -> None:
