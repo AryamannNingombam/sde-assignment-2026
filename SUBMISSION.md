@@ -38,8 +38,10 @@ Runbook for on-call: README §11.
    "two requests a day" (`settings.TENANT_*`).
 7. A rejection with a specific reason, a second rejection, or a rejected rollback is the client's decision. A
    routine request rejected with no specific reason ("judgement call") is re-derived from fresh data and asked
-   once more, no earlier than the next approver day (§6). An incident fix is re-asked once only for an open
-   safety incident, after every other candidate has been tried.
+   once more, no earlier than the next approver day (§6). An unexplained rejection is detected by the
+   approver's reason text (`settings.REQUEUE_REASON_MARKERS`, pinned by a test against the simulator's
+   wording); if that wording changed, the rejection would simply count as final. An incident fix is re-asked
+   once only for an open safety incident, after every other candidate has been tried.
 8. A supervisor edit always stands. We never revert one except through an approval request that names it.
 9. Simulated time is the only clock for logic. Wall time is used only for load metrics.
 
@@ -223,7 +225,8 @@ completed, so a restart within the same minute doesn't double-count detector win
 - **Decay and rollback.** The winner goes to 90% with a 10% concurrent holdback. Every day at 13:00, a
   non-overlapping 24h window compares winner vs holdback on the primary and on the guardrail. The decay α is split
   across both checks and all remaining days: **α = 0.05 / (D_max × 2)** (D_max = days left when the experiment
-first enters monitoring, never recomputed on a step-down or an undone de-risk; 30 in production),
+first enters monitoring, never recomputed on a step-down or an undone de-risk; 30 in production; further
+divided by the number of live challengers when more than one is monitored),
   so the family-wise false-rollback rate is ≤ 5%. One window of a 10% holdback is only about 110 connected
   calls, so **one window never triggers a full revert**: a first signal only cuts exposure by one in-policy
   de-risk step where the policy allows it (otherwise it is recorded and watched), and the full revert is
@@ -273,8 +276,16 @@ first enters monitoring, never recomputed on a step-down or an undone de-risk; 3
   (explore, advance, promote, conclude) rejected with no specific reason: the experiment returns to the state
   it decided from and re-derives the request from data up to then, under a new proposal_id, no earlier than
   the next approver day. That is once per experiment. A second rejection, or any specific reason (policy,
-  fatigue, validation), ends it as `REJECTED`. This extends the memo: it names expiry, not rejection. Without
-  it, a single random decline ended nw_renewal's whole welcome/voice programme for 10 days on public_02.
+  fatigue, validation), is final. This extends the memo: it names expiry, not rejection. Without it, a single
+  random decline ended nw_renewal's whole welcome/voice programme for 10 days on public_02.
+- **A final rejection never leaves an unwatched split.** If the declined change leaves a challenger live (a
+  declined advance, promote or conclude), the experiment goes to `MONITORING_SPLIT` under the daily decay
+  monitor, with the client's decision recorded and a summary alert. The monitor checks every live challenger,
+  with α also split across them. Only a split already at 100% control ends as `REJECTED`.
+- **Per-experiment callbacks in batched requests.** Routine actions of one workflow share a request whose kind
+  is e.g. `promote+stepdown`. Each experiment stores its own action, and the apply-time re-check and the
+  rejection/expiry handling branch on that. Before this fix, a batched promotion skipped its "still passes"
+  re-check and a rejected batched step-down ended unmonitored (regression test).
 - **Batching and timing.** One routine request in flight per workflow, batching every dimension that changes
   together. Submission happens only in approver hours (Kestrel ≥ 11:00), and only when the p75 latency plus one
   tick fits before hours end. Routine requests expire at the end of that approver day, so stale evidence isn't

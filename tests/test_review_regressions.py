@@ -409,3 +409,41 @@ def test_unexplained_rejection_is_requeued_once_from_fresh_data_on_the_next_appr
     cycle, state = rejected_explore("approver fatigue: more than 4 requests in 24h for this workflow")
     cycle("D0 14:00")
     assert state() == "REJECTED"                                  # a specific reason is never re-queued
+
+
+def test_final_rejection_with_a_live_challenger_stays_monitored():
+    """Review: a final rejection of promote/advance/conclude set terminal REJECTED while a challenger was still
+    live on the split, so nothing would ever roll it back. A promote rejected twice now ends in MONITORING_SPLIT."""
+    spec = {"workflow_id": "wf", "tenant_id": "t", "objective": {"primary": "engagement_rate",
+                                                                 "guardrail": {"pickup_rate_max_drop": 0.02}},
+            "governance": {"approver_hours": [10, 19]}}
+    conn, _ = _experiments_env()
+    store.set_meta(conn, "end_minute", parse("D10 00:00"))
+    cfg = configs.current(conn, "wf")[1]
+    cfg["allocations"]["default"]["voice"] = {"V1": 0.5, "V3": 0.5}
+    conn.execute("UPDATE config_versions SET config_json=?", (json.dumps(cfg),))
+    exps = Experiments(conn, {"wf": spec})
+    eid = conn.execute("INSERT INTO experiments(wf, dim, kpi, stage, state, control, arms_json, screened_json,"
+                       " result_json) VALUES('wf','voice','engagement_rate',2,'PROMOTING','V1','[\"V3\"]','[]',?)",
+                       (json.dumps({"requeues": 1}),)).lastrowid          # the one re-queue is already spent
+
+    for n in (1, 2):
+        res = json.loads(conn.execute("SELECT result_json FROM experiments WHERE id=?", (eid,)).fetchone()[0])
+        res["pending"] = {"action": "promote", "prev_state": "STAGE2", "proposal_id": f"wf:{n}:1"}
+        conn.execute("UPDATE experiments SET result_json=? WHERE id=?", (json.dumps(res), eid))
+    p = {"refs_json": json.dumps({"experiments": {str(eid): "PROMOTED"}}), "kind": "promote",
+         "proposal_id": "wf:2:1", "reasons": json.dumps(["approver declined (judgement call)"])}
+    exps.on_terminal(conn, p, "REJECTED", parse("D6 14:00"))
+    row = conn.execute("SELECT state, arms_json, result_json FROM experiments WHERE id=?", (eid,)).fetchone()
+    assert row["state"] == "MONITORING_SPLIT" and json.loads(row["arms_json"]) == ["V3"]
+    res = json.loads(row["result_json"])
+    assert res["client_declined"] == "promote" and res["kept_split"] and res["d_max"] == 4
+
+
+def test_requeue_marker_matches_the_simulators_actual_reason_text():
+    """REQUEUE_REASON_MARKERS depends on the approver's wording; if it drifts, re-queueing silently stops."""
+    from pathlib import Path
+    from controller import settings
+    source = (Path(__file__).resolve().parents[1] / "sim" / "world.py").read_text(encoding="utf-8")
+    assert all(m in source for m in settings.REQUEUE_REASON_MARKERS)
+    assert "approver declined (judgement call)" in source

@@ -12,6 +12,7 @@ One row per (workflow, dimension). Lifecycle (SUBMISSION §5):
      PROMOTED --daily decay check fires--> ROLLING_BACK [--auto de-risk step--> DERISKED] --apply--> ROLLED_BACK
      DERISKED --3 clean daily windows--> RESTORING --apply--> PROMOTED | MONITORING_SPLIT (asked once)
      DERISKED --48h unresolved--> DERISKED_STALLED (terminal for automation; a human decides)
+  Final rejection of a routine request -> MONITORING_SPLIT if any challenger is still live, else REJECTED.
   Routine request rejected with no specific reason (judgement call) -> back to the state it was decided from,
   re-derived from fresh data on the next approver day, once. A second such rejection, or a specific reason ->
   REJECTED.
@@ -205,9 +206,9 @@ class Experiments:
             store.record_decision(self.conn, minute, exp["wf"], "experiment", "stage2 daily harm look: no harm",
                                   inputs, "continue", experiment_id=exp["id"])
         n_req = exp["n_required"]
+        if self._requeue_wait(exp, minute):
+            return None                         # both the recheck and an interim look wait; the harm look above never does
         if exp["looks_done"] >= settings.STAGE2_LOOKS:
-            if self._requeue_wait(exp, minute):
-                return None                     # after the daily harm look above, which never waits
             # Every pre-declared look is spent; we are back here because a promotion request didn't land. No new
             # test: re-propose only if a look already passed AND the result still holds now. Requiring both can only
             # lower the false-winner rate, so the family-wise alpha stays <= ALPHA.
@@ -361,16 +362,24 @@ class Experiments:
         res["last_decay_check"] = minute
         res["decay_checks"] = res.get("decay_checks", 0) + 1
         self._save_result(exp, res)
-        ch = json.loads(exp["arms_json"])[0]
+        arms = json.loads(exp["arms_json"])     # usually one; a declined advance leaves a 80/10/10 screen live
         h = minute // 60
         data = metrics.by_option(self.conn, exp["wf"], exp["dim"], since_hour=h - settings.DECAY_WINDOW_MIN // 60,
                                  until_hour=h, min_version=exp["start_version"], cohorts=self._cohorts(exp))
-        a, b = data.get(ch, metrics.Counts()), data.get(exp["control"], metrics.Counts())
-        alpha = settings.ALPHA / (res["d_max"] * settings.DECAY_METRICS)
+        b = data.get(exp["control"], metrics.Counts())
+        # alpha split over checks, metrics AND live arms, so the family-wise false-rollback rate stays <= ALPHA
+        alpha = settings.ALPHA / (res["d_max"] * settings.DECAY_METRICS * len(arms))
         g_kpi, _ = _guardrail(spec)
-        p_primary = stats.p_less(*a.num_den(exp["kpi"]), *b.num_den(exp["kpi"]))
-        p_guard = stats.p_less(*a.num_den(g_kpi), *b.num_den(g_kpi))
+
+        def worse(arm):
+            a = data.get(arm, metrics.Counts())
+            return (stats.p_less(*a.num_den(exp["kpi"]), *b.num_den(exp["kpi"])),
+                    stats.p_less(*a.num_den(g_kpi), *b.num_den(g_kpi)))
+        ch = min(arms, key=lambda arm: min(worse(arm)))          # the arm with the strongest evidence of harm
+        a = data.get(ch, metrics.Counts())
+        p_primary, p_guard = worse(ch)
         inputs = {"window": [fmt(minute - settings.DECAY_WINDOW_MIN), fmt(minute)], "alpha_decay": round(alpha, 5),
+                  "arms_checked": arms, "worst_arm": ch,
                   "counts": _counts_dict(data, exp["kpi"]), "p_primary_worse": _r(p_primary, 6),
                   "p_guardrail_worse": _r(p_guard, 6), "check": res["decay_checks"], "d_max": res["d_max"]}
         fired = p_primary < alpha or p_guard < alpha
@@ -648,12 +657,8 @@ class Experiments:
                               {"derisk_expires": None}, proposal_id=p["proposal_id"])
                     store.raise_alert(conn, minute, "summary", exp["wf"],
                                       f"client kept {exp['dim']} promotion despite decay evidence (exp {exp['id']})")
-                elif self._requeue(exp, res, p, prev, action, minute):
-                    pass
-                else:
-                    self._save_result(exp, res)
-                    self._set(exp, minute, "REJECTED", f"{action} rejected by approver; current split kept", {},
-                              proposal_id=p["proposal_id"])
+                elif not self._requeue(exp, res, p, prev, action, minute):
+                    self._final_rejection(exp, res, p, action, minute)
                 continue
             if action == "rollback" and state in ("EXPIRED", "LAPSED"):
                 res["revert_redrafts"] = res.get("revert_redrafts", 0) + 1
@@ -681,6 +686,29 @@ class Experiments:
                                      f"re-decide from fresh data and re-ask once, not before {fmt(after)}", {},
                   proposal_id=p["proposal_id"])
         return True
+
+    def _final_rejection(self, exp, res: dict, p, action: str, minute: int) -> None:
+        """The client declined the change, so the current split stays. If any challenger is still live on it (a
+        declined advance, promote or conclude), it stays under the daily decay monitor: a terminal state would
+        leave live traffic on an option nothing watches. Only a split that is already 100% control ends here."""
+        _, cur = configs.current(self.conn, exp["wf"])
+        dist = configs.dist(cur, "default", exp["dim"])
+        live = [o for o in sorted(dist, key=lambda o: -dist[o]) if o != exp["control"] and dist[o] > 0]
+        res["client_declined"] = action
+        if not live:
+            self._save_result(exp, res)
+            self._set(exp, minute, "REJECTED", f"{action} rejected by approver; control already at 100%", {},
+                      proposal_id=p["proposal_id"])
+            return
+        res.update(kept_split=True, promoted_minute=minute, d_max=self._d_max(res, minute))
+        self._save_result(exp, res)
+        self._set(exp, minute, "MONITORING_SPLIT",
+                  f"{action} rejected by approver (final): current split {dist} kept as the client chose; live "
+                  f"challengers {live} monitored daily", {"arms_json": json.dumps(live), "stage": 3,
+                                                          "start_minute": minute}, proposal_id=p["proposal_id"])
+        store.raise_alert(self.conn, minute, "summary", exp["wf"],
+                          f"client declined {exp['dim']} {action}; split {dist} kept under daily monitoring "
+                          f"(exp {exp['id']})")
 
     def _requeue_wait(self, exp, minute: int) -> bool:
         after = json.loads(exp["result_json"]).get("requeue_after")

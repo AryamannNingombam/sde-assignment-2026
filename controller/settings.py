@@ -32,7 +32,9 @@ RESTORE_MAX_ASKS = 1                # undoing a de-risk step is proposed once; a
 CLIENT_KEPT_MAX_REASKS = 1          # after a client rejects a rollback: at most one more ask, on fresh confirmation
 REQUEUE_MAX = 1                     # an unexplained rejection of a routine request is re-queued once per experiment
 REQUEUE_REASON_MARKERS = ("judgement call",)   # rejection reasons that name no specific fault; any other reason
-                                    # (policy, fatigue, validation, missing fields) is specific, and final
+                                    # (policy, fatigue, validation, missing fields) is specific, and final.
+                                    # Depends on the approver's wording: if it changes, re-queueing stops (fails
+                                    # safe: the rejection is final). Pinned by a test against the simulator text.
 BAND_SAFETY_ALPHA = 0.05 / 4        # per-age-band harm check at promotion
 SPLIT_FEATURE = "age_band"          # the one pre-declared cohort split dimension
 MAX_COHORTS_PER_WF = 3
