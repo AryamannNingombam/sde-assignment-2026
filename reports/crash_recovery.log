@@ -1,0 +1,21 @@
+attempt 0: died at crash point 'after_approval_post' (rc=137)
+attempt 1: died at crash point 'after_apply_post' (rc=137)
+attempt 2: died at crash point 'after_auto_put' (rc=137)
+attempt 3: hard exit at tick 70
+attempt 4: hard exit at tick 96
+attempt 5: hard exit at tick 140
+attempt 6: SIGKILL after run start
+attempt 7: controller finished cleanly after 7 kills
+{
+ "kills": 7,
+ "sim_finished": true,
+ "approval_requests_in_sim": 21,
+ "our_approval_proposals": 21,
+ "apply_conflicts": 0,
+ "approvals_lapsed": 0,
+ "auto_applied": 36,
+ "credits_remaining_in_sim": 197.0,
+ "credits_logged_by_controller": 3.0,
+ "problems": []
+}
+OK: all invariants hold after 7 crashes

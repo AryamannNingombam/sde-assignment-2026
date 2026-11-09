@@ -1,0 +1,174 @@
+{
+ "as_of": "D9 23:45",
+ "workflows": {
+  "nw_renewal": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.3031,
+    "engagement_rate": 0.5536
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2721,
+    "engagement_rate": 0.546
+   },
+   "experiments": {
+    "voice": {
+     "control": "V2",
+     "testing_since": null,
+     "winning": {},
+     "stopped_arms": {
+      "V4": [
+       "all=all"
+      ]
+     },
+     "held_until_day": 7
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {},
+     "stopped_arms": {
+      "W3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D9 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 2573 active leads (model-expected pickup +16.4%)"
+    },
+    {
+     "at": "D9 08:15",
+     "kind": "applied",
+     "what": "nw_renewal.v25.b9538ae531.a0 applied as v26 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": []
+  },
+  "nw_kyc": {
+   "primary_kpi": "pickup_rate",
+   "guardrail": {
+    "engagement_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.322,
+    "engagement_rate": 0.5916
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2619,
+    "engagement_rate": 0.5978
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {},
+     "stopped_arms": {},
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {},
+     "stopped_arms": {
+      "W2": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [],
+   "alerts": [],
+   "incidents": []
+  },
+  "ks_cancel": {
+   "primary_kpi": "engagement_rate",
+   "guardrail": {
+    "pickup_rate_max_drop": 0.02
+   },
+   "kpis_last_2d": {
+    "pickup_rate": 0.2531,
+    "engagement_rate": 0.5173
+   },
+   "kpis_history_baseline": {
+    "pickup_rate": 0.2543,
+    "engagement_rate": 0.5008
+   },
+   "experiments": {
+    "voice": {
+     "control": "V1",
+     "testing_since": 0,
+     "winning": {
+      "age_band=46-60": "V3"
+     },
+     "stopped_arms": {
+      "V2": [
+       "all=all"
+      ],
+      "V3": [
+       "age_band=18-30"
+      ],
+      "V4": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    },
+    "welcome_message": {
+     "control": "W1",
+     "testing_since": 0,
+     "winning": {},
+     "stopped_arms": {
+      "W2": [
+       "age_band=46-60"
+      ],
+      "W3": [
+       "all=all"
+      ]
+     },
+     "held_until_day": null
+    }
+   },
+   "waiting_on_approver": [],
+   "changed_today": [
+    {
+     "at": "D9 08:15",
+     "kind": "auto_apply_plan",
+     "what": "preferred hour for 3794 active leads (model-expected pickup +14.7%)"
+    },
+    {
+     "at": "D9 08:15",
+     "kind": "applied",
+     "what": "ks_cancel.v24.3a65f110fa.a0 applied as v25 (auto)"
+    }
+   ],
+   "alerts": [],
+   "incidents": [
+    {
+     "state": "verified",
+     "opened": "D3 13:15",
+     "detail": 0.0753
+    }
+   ]
+  }
+ },
+ "loop_health": {
+  "ingest_lag_sim_minutes": 172.0,
+  "decide_seconds_last_tick": 0.0010831356048583984,
+  "decisions_last_sim_hour": 0,
+  "credits_remaining": 197.0,
+  "credits_spent_by_controller": 3.0,
+  "open_proposals": 0
+ }
+}
